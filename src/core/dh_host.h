@@ -21,14 +21,25 @@ struct NoteMap {
     std::array<bool, 128> valid{}; std::array<Stroke, 128> st{};
 };
 
+// how incoming MIDI is interpreted (the page's MIDI panel; saved with the project)
+struct MidiMap {
+    enum Target { Pedal = 0, Strike = 1, Choke = 2 };
+    struct Cc { int cc = -1; int target = Pedal; int piece = -1; bool invert = false; };   // piece -1: all (pedal: every hi-hat)
+    double velCurve = 0;      // -1 .. 1: positive plays louder for the same key velocity
+    double bendRange = 2;     // semitones each way
+    int bendPiece = -1;       // -1: the whole kit
+    int nCc = 0; Cc ccs[16];
+};
+MidiMap parseMidiMap(const Json& j);   // missing -> defaults (CC4 and CC1 work the hi-hat pedal)
+
 struct Cmd {
     enum Kind { None, Single, Mode, SetKit, KPiece, KTrim, KMix, KMap, KOn, KOff, KPress, KCc, Punch, Panic,
-                Strike, Tongue, On, Off, Press, Cc, Choke, Pedal, PedalValue, Bus };
+                Strike, Tongue, On, Off, Press, Cc, Choke, Pedal, PedalValue, Bus, Midi };
     Kind kind = None;
     std::unique_ptr<Player> player; std::unique_ptr<Kit> kit; std::unique_ptr<NoteMap> notes;
     int i = 0, n = 0, note = 0, num = 0; bool flag = false, hasLevel = false, hasPan = false, hasId = false;
     double v = 0, v2 = 0, level = 0, pan = 0, r = 0, theta = 0, vel = 0, symp = NAN;
-    std::string id, mode, kind2; Stroke st;
+    std::string id, mode, kind2; Stroke st; MidiMap midi;
     std::vector<std::pair<double, double>> mix; std::vector<std::pair<int, Slot>> map;
     // filled on the audio thread: what the command replaced
     std::unique_ptr<Player> oldPlayer; std::unique_ptr<Kit> oldKit; std::unique_ptr<NoteMap> oldNotes;
@@ -50,8 +61,10 @@ public:
     void noteOff(int note);
     void polyPressure(int note, double v);
     void channelPressure(double v);
-    void controller(int cc, double v, int pedalCC);
-    void process(float* L, float* R, int n);
+    void controller(int cc, double v);
+    void pitchBend(double b);   // -1 .. 1
+    void process(float* L, float* R, int n, float* const* outL = nullptr, float* const* outR = nullptr, int nOut = 0);
+    const MidiMap& midiMap() const { return midi; }
     bool kitMode() const { return kitOn; }
 
     // bus settings the plugin applies after the engine (room reverb, master)
@@ -65,6 +78,8 @@ private:
     double sr;
     std::unique_ptr<Player> single; std::unique_ptr<NoteMap> notes;
     std::unique_ptr<Kit> kit; bool kitOn = false;
+    void applyPitch();
+    MidiMap midi = parseMidiMap(Json()); double bend = 0, strikeOv = NAN;
     double pu = 0, kv = 0; bool havePunch = false;   // (no punch until the page or the project sets it, as in the browser)
 };
 

@@ -28,7 +28,7 @@ struct Group {
     std::vector<int> ids; double b0 = 0, a1 = 0, a2 = 0, norm = 0;
     double zL[2] = { 0, 0 }, zR[2] = { 0, 0 };
     double eC = 0, eL = 0, eR = 0, tC = 0, tL = 0, tR = 0;
-    bool osc = false; int K = 0; std::vector<double> c, s, x, y, wA, wB; double kc = 0, kn = 0;
+    bool osc = false; int K = 0; std::vector<double> c, s, x, y, wA, wB, wo; double kc = 0, kn = 0;
 };
 struct HHPoint { std::vector<double> d, pt, pb; double Y = 0, tilt = 0, F = 0, s = 0, sv = 0, sp = 0; };
 struct HH {
@@ -116,11 +116,11 @@ public:
                 int K = (int) jmax(lightQ ? 4 : 7, jmin(Kmx, jsround(dens * (eHi - eLo) / 1000)));
                 double cSeed = jsround(std::fmod(M.top.a * 997 + M.top.heff * 7.3e4 + modes.size() * 13.0, 9973));
                 if (eHi > eLo * 1.05) {
-                    G.osc = true; G.K = K; G.c.assign(K, 0); G.s.assign(K, 0); G.x.assign(K, 0); G.y.assign(K, 0); G.wA.assign(K, 0); G.wB.assign(K, 0);
+                    G.osc = true; G.K = K; G.c.assign(K, 0); G.s.assign(K, 0); G.x.assign(K, 0); G.y.assign(K, 0); G.wA.assign(K, 0); G.wB.assign(K, 0); G.wo.assign(K, 0);
                     double sA = 0, sB = 0;
                     for (int ko = 0; ko < K; ko++) {
                         double fo = eLo + (eHi - eLo) * (ko + 0.15 + 0.7 * hashf(bk * 131 + ko + cSeed, 91)) / K, wo = TAU * fo / sr, ph = TAU * hashf(bk * 131 + ko, 92);
-                        G.c[ko] = std::cos(wo); G.s[ko] = std::sin(wo); G.x[ko] = std::cos(ph); G.y[ko] = std::sin(ph);
+                        G.wo[ko] = wo; G.c[ko] = std::cos(wo); G.s[ko] = std::sin(wo); G.x[ko] = std::cos(ph); G.y[ko] = std::sin(ph);
                         G.wA[ko] = 0.3 + 0.7 * hashf(bk * 131 + ko, 93); G.wB[ko] = 0.3 + 0.7 * hashf(bk * 131 + ko, 94); sA += G.wA[ko] * G.wA[ko]; sB += G.wB[ko] * G.wB[ko];
                     }
                     double nA = std::sqrt(2 / sA), nB2 = std::sqrt(2 / sB); for (int ko = 0; ko < K; ko++) { G.wA[ko] *= nA; G.wB[ko] *= nB2; }
@@ -209,6 +209,18 @@ public:
             if (hh.stack && FhPrev != FhPrev) FhPrev = 1;
         }
         if (!(hasBow && bow.on)) hasBow = false;
+        w2b = w2; double p0 = pitch; pitch = 1; setPitch(p0);
+    }
+
+    void setPitch(double ratio) override
+    {
+        if (ratio == pitch) return;
+        pitch = ratio; double r2 = ratio * ratio, lim = (1.95 / dt) * (1.95 / dt);
+        for (int i = 0; i < N && i < (int) w2b.size(); i++) {
+            if (!w2b[i]) continue;
+            w2[i] = std::min(w2b[i] * r2, lim); mmx[i] = jmax(0, 3.3 / (w2[i] * dt * dt) - 1);
+        }
+        for (auto& G : groups) if (G.osc) for (int ko = 0; ko < G.K; ko++) { double w = G.wo[ko] * ratio; G.c[ko] = std::cos(w); G.s[ko] = std::sin(w); }
     }
 
     void settle() override
@@ -511,6 +523,7 @@ private:
     }
 
     double sr; int N = 0, nB = 0; double dt = 0;
+    std::vector<double> w2b;
     std::vector<double> q, v, w2, a2, invM, chW, ck, sk, qs, oC, mmx, hhW, oHL, oHR, wTone, pOC, pOL, pOR, oD;
     std::vector<double> jit, jS, jD, jC[4]; double jL[4] = {}, jG[4] = {}; bool jOn = false; uint32_t jSeed = 777; double jAmp = 0;
     double qB = 0, mcL = 0, mcR = 0, moh = 0, dingE = 0, dingK = 0;

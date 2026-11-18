@@ -77,6 +77,17 @@ td.h-b{color:var(--accent2)} td.h-r{color:var(--cool)}
 .modal.show{display:flex}
 .modal .box{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:16px;width:min(680px,92vw)}
 .modal textarea{width:100%;height:340px;background:#100e0c;color:var(--ink);border:1px solid var(--line2);border-radius:8px;font-family:var(--mono);font-size:12px;padding:10px}
+.midibox{width:min(760px,94vw);max-height:88vh;overflow:auto}
+.midisec{margin:0 0 14px}.midisec h5{margin:0 0 6px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.midisec p{margin:4px 0 8px;color:var(--ink3);font-size:12px;line-height:1.45}
+.midirow{display:grid;grid-template-columns:70px 72px 1fr 1fr 70px 28px;gap:6px;align-items:center;margin:4px 0}
+.midirow input[type=number]{width:100%;background:#100e0c;color:var(--ink);border:1px solid var(--line2);border-radius:6px;padding:5px 6px;font-family:var(--mono)}
+.midirow select{width:100%}.midirow label{font-size:12px;color:var(--ink2);display:flex;gap:4px;align-items:center}
+.midirow .learn.on{background:var(--accent);color:#1b140a}
+.midihead{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink3)}
+.midiline{display:flex;gap:10px;align-items:center;margin:6px 0;font-size:12px;color:var(--ink2)}.midiline input[type=range]{flex:1}
+.midiouts{font-family:var(--mono);font-size:12px;color:var(--ink2);columns:2;margin:4px 0}
+.midilast{margin-right:auto;font-family:var(--mono);font-size:12px;color:var(--ink3)}
 .modal .btns{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#2a2219;border:1px solid var(--accent);color:var(--ink);padding:8px 14px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:20}
 .toast.show{opacity:1}
@@ -126,7 +137,8 @@ td.h-b{color:var(--accent2)} td.h-r{color:var(--cool)}
   <div class="velbar">vel <input type="range" id="velTop" min="0.02" max="1" step="0.01"><span id="velTopV"></span></div>
   <button id="panicBtn" title="Stop all sound">Silence</button>
   <div class="spacer"></div>
-  <button id="jsonBtn">Preset JSON</button>
+  <button id="midiBtn" title="MIDI controls, velocity curve, pitch bend and outputs" style="display:none">MIDI</button>
+  <button id="jsonBtn" title="Copy or paste the preset / kit as JSON">JSON</button>
   <div class="status"><span><span class="dot" id="audioDot"></span><span id="audioTxt">audio off — click Hit</span></span><span id="midiTxt"></span></div>
 </header>
 <main>
@@ -168,6 +180,11 @@ td.h-b{color:var(--accent2)} td.h-r{color:var(--cool)}
   <h4 style="margin:0 0 8px;color:var(--ink3);letter-spacing:.14em;font-size:11px;text-transform:uppercase">Preset JSON — copy to save, or paste and Load</h4>
   <textarea id="jsonTxt" spellcheck="false"></textarea>
   <div class="btns"><button id="jsonCopy">Copy</button><button id="jsonLoad">Load pasted</button><button class="primary" id="jsonClose">Close</button></div>
+</div></div>
+<div class="modal" id="midiModal"><div class="box midibox">
+  <h4 style="margin:0 0 10px;color:var(--ink3);letter-spacing:.14em;font-size:11px;text-transform:uppercase">MIDI — controls, feel and outputs</h4>
+  <div id="midiBody"></div>
+  <div class="btns"><span id="midiLast" class="midilast"></span><button class="primary" id="midiClose">Done</button></div>
 </div></div>
 <div class="toast" id="toast"></div>
 
@@ -2733,10 +2750,10 @@ function playTongue(idx, vel, noVisual) {
 function nearestTongue(note) {
   var best = null, bd = 1e9; model.tongues.forEach(function (t) { var d = Math.abs(t.note - note); if (d < bd) { bd = d; best = t; } }); return best;
 }
-// Regular drum: one octave of keys spans the head. C = dead centre ... A# = near the edge, B = rimshot.
+// Regular drum: one octave of keys spans the head. C = dead centre ... A# = near the edge, B = the bare rim.
 function drumKeySt(pc, vel) {
   var s = cfg.strike;
-  return pc === 11 ? { r: 0.93, theta: s.theta, vel: vel, mode: 'rimshot' } : { r: pc / 10 * 0.95, theta: s.theta, vel: vel, mode: 'head' };
+  return pc === 11 ? { r: 0.97, theta: s.theta, vel: vel, mode: 'rim' } : { r: pc / 10 * 0.95, theta: s.theta, vel: vel, mode: 'head' };
 }
 // Cymbals: one octave runs bell -> edge. White keys = stick tip, black keys = shoulder (crash-style).
 function metalPos(pc) {
@@ -3149,14 +3166,14 @@ function buildPads() {
       '<kbd>K</kbd> choke' + (cfg.special.piece === 'hihat' ? ', <kbd>L</kbd> pedal chick, <kbd>;</kbd> pedal splash, hold <kbd>Q</kbd> to keep the foot down' : '') +
       '. MIDI: aftertouch grabs/chokes (or swells a roll), CC1 = roll speed' + (cfg.special.piece === 'hihat' ? ', CC4 = hi-hat pedal, C7 choke, D7 chick, E7 splash, C♯7 foot.' : ', C7 = choke.');
   } else if (cfg.kind !== 'none') {
-    var lbl = ['center', '', '', '', '', 'middle', '', '', '', 'edge', 'rimshot'];
+    var lbl = ['center', '', '', '', '', 'middle', '', '', '', 'edge', 'rim'];
     for (var pc = 0; pc < 12; pc++) (function (pc) {
       var b = document.createElement('button'); b.className = 'pad' + ([1, 3, 6, 8, 10].indexOf(pc) >= 0 ? ' blk' : ''); b.dataset.pad = 'k' + pc;
       b.innerHTML = NOTE[pc] + '<i>' + PIANO_LBL[pc] + '</i>' + (pc === 0 ? '<u>center</u>' : pc === 5 ? '<u>mid</u>' : pc === 10 ? '<u>edge</u>' : pc === 11 ? '<u>rim</u>' : '');
       padHold(b, 'pk' + pc, function () { lightPad('k' + pc); return drumKeySt(pc, cfg.strike.vel); });
       el.appendChild(b);
     })(pc);
-    $('padHint').innerHTML = 'Each octave spans the head: <b>C</b> hits dead center, each key steps outward, <b>A♯</b> is at the edge and <b>B</b> is a rimshot — on any octave of a MIDI keyboard, or <kbd>A</kbd> <kbd>W</kbd> <kbd>S</kbd> … <kbd>J</kbd> on your computer keyboard.';
+    $('padHint').innerHTML = 'Each octave spans the head: <b>C</b> hits dead center, each key steps outward, <b>A♯</b> is at the edge and <b>B</b> hits the rim (stick on the hoop only) — on any octave of a MIDI keyboard, or <kbd>A</kbd> <kbd>W</kbd> <kbd>S</kbd> … <kbd>J</kbd> on your computer keyboard.';
   } else { $('padHint').textContent = ''; }
 }
 
@@ -3787,6 +3804,65 @@ function kitGroove(btn) {
 }
 
 window.__drum = { get kit() { return kit; }, get kitMode() { return kitMode; }, get kitModels() { return kitModels; }, get barRects() { return barRects; }, makeIR: makeIR, buildBus: buildBus, setBus: setBus, get anim() { return anim; }, get shapes() { return shapes; }, get model() { return model; }, get ctx() { return ctx; }, get node() { return node; }, get cfg() { return cfg; } };
+// ---------------- MIDI panel (plugin): what CCs do, velocity feel, pitch bend, per-piece outputs ----------------
+var MIDI_DEF = { velCurve: 0, bendRange: 2, bendPiece: -1, ccs: [{ cc: 4, target: 'pedal', piece: -1 }, { cc: 1, target: 'pedal', piece: -1 }] };
+var midiCfg = (function () { try { var m = JSON.parse(LS.getItem('drumlab.midi') || 'null'); if (m && m.ccs) return m; } catch (e) {} return clone(MIDI_DEF); })();
+var learnRow = -1;
+function midiSave() { try { LS.setItem('drumlab.midi', JSON.stringify(midiCfg)); } catch (e) {} post({ type: 'midicfg', cfg: midiCfg }); }
+function midiPieces() { return kitMode && kit ? kit.pieces.map(function (p, i) { return { i: i, name: (i + 1) + '. ' + (p.name || 'Piece') }; }) : []; }
+function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function renderMidi() {
+  var ps = midiPieces(), h = '';
+  var tgtOpts = [['pedal', 'Hi-hat pedal'], ['strike', 'Strike position'], ['choke', 'Choke / grab']];
+  function pieceSel(cur, allLbl) {
+    if (!ps.length) return '<select disabled><option>This instrument</option></select>';
+    return '<select>' + ['<option value="-1"' + (cur < 0 ? ' selected' : '') + '>' + allLbl + '</option>'].concat(ps.map(function (p) { return '<option value="' + p.i + '"' + (p.i === cur ? ' selected' : '') + '>' + esc(p.name) + '</option>'; })).join('') + '</select>';
+  }
+  h += '<div class="midisec"><h5>Controllers</h5><p>Point any CC (mod wheel, foot controller, a knob) at a control. Hi-hat pedal: 0 = foot up (open), 127 = closed. Strike position: 0 = centre (a cymbal’s bell), 127 = edge. Click <b>Learn</b>, then move the control.</p>';
+  h += '<div class="midirow midihead"><span>CC</span><span></span><span>Controls</span><span>Piece</span><span>Reverse</span><span></span></div>';
+  midiCfg.ccs.forEach(function (c, i) {
+    h += '<div class="midirow" data-i="' + i + '"><input type="number" min="0" max="127" value="' + c.cc + '" data-k="cc"><button class="learn' + (learnRow === i ? ' on' : '') + '" data-k="learn">' + (learnRow === i ? 'Move…' : 'Learn') + '</button>' +
+      '<select data-k="target">' + tgtOpts.map(function (o) { return '<option value="' + o[0] + '"' + (c.target === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select>' +
+      pieceSel(c.piece == null ? -1 : c.piece, c.target === 'pedal' ? 'Every hi-hat' : 'All pieces').replace('<select', '<select data-k="piece"') +
+      '<label><input type="checkbox" data-k="invert"' + (c.invert ? ' checked' : '') + '>rev</label><button data-k="del" title="Remove">×</button></div>';
+  });
+  h += '<div class="midiline"><button id="midiAdd">+ Add controller</button><button id="midiReset">Reset to defaults</button></div></div>';
+  var vc = midiCfg.velCurve || 0;
+  h += '<div class="midisec"><h5>Velocity</h5><div class="midiline"><span>softer</span><input type="range" id="midiVel" min="-1" max="1" step="0.05" value="' + vc + '"><span>harder</span><span id="midiVelV" style="width:150px;font-family:var(--mono)"></span></div><p>Shapes how key velocity maps to stroke strength. Middle = as played.</p></div>';
+  h += '<div class="midisec"><h5>Pitch bend</h5><div class="midiline"><span>Range ±</span><input type="number" id="midiBend" min="0" max="24" step="1" value="' + (midiCfg.bendRange == null ? 2 : midiCfg.bendRange) + '" style="width:64px"><span>semitones</span><span style="margin-left:14px">bends</span>' +
+    pieceSel(midiCfg.bendPiece == null ? -1 : midiCfg.bendPiece, 'The whole kit').replace('<select', '<select id="midiBendP"') + '</div><p>The bend wheel retunes the modes live, like turning the tension rods (or the tuning of a bar) while it rings.</p></div>';
+  h += '<div class="midisec"><h5>Separate outputs</h5><p>Turn on the extra outputs in your DAW (in Cakewalk: insert the synth with <b>All synth audio outputs: stereo</b>). Each piece then plays on its own stereo pair and leaves the main mix; the room reverb stays on the main mix.</p>';
+  h += ps.length ? '<div class="midiouts">' + ps.map(function (p) { return 'Out ' + (p.i + 2) + ' → ' + esc(p.name); }).join('<br>') + '</div>' : '<p>(In kit mode each piece gets its own output.)</p>';
+  h += '</div>';
+  $('midiBody').innerHTML = h;
+  var curveTxt = function (v) { var e = Math.pow(3, -v); return 'vel 64 → ' + Math.round(127 * Math.pow(64 / 127, e)); };
+  $('midiVelV').textContent = curveTxt(vc);
+  $('midiVel').oninput = function () { midiCfg.velCurve = +this.value; $('midiVelV').textContent = curveTxt(+this.value); midiSave(); };
+  $('midiBend').onchange = function () { midiCfg.bendRange = Math.max(0, Math.min(24, +this.value || 0)); midiSave(); };
+  if ($('midiBendP')) $('midiBendP').onchange = function () { midiCfg.bendPiece = +this.value; midiSave(); };
+  $('midiAdd').onclick = function () { midiCfg.ccs.push({ cc: 11, target: 'strike', piece: -1 }); learnRow = midiCfg.ccs.length - 1; midiSave(); renderMidi(); };
+  $('midiReset').onclick = function () { midiCfg = clone(MIDI_DEF); learnRow = -1; midiSave(); renderMidi(); };
+  Array.prototype.forEach.call($('midiBody').querySelectorAll('.midirow[data-i]'), function (row) {
+    var i = +row.getAttribute('data-i'), c = midiCfg.ccs[i];
+    row.querySelectorAll('[data-k]').forEach(function (el) {
+      var k = el.getAttribute('data-k');
+      if (k === 'learn') el.onclick = function () { learnRow = learnRow === i ? -1 : i; renderMidi(); };
+      else if (k === 'del') el.onclick = function () { midiCfg.ccs.splice(i, 1); learnRow = -1; midiSave(); renderMidi(); };
+      else if (k === 'invert') el.onchange = function () { c.invert = this.checked; midiSave(); };
+      else el.onchange = function () { c[k] = k === 'target' ? this.value : Math.max(k === 'cc' ? 0 : -1, Math.min(127, Math.round(+this.value))); if (k === 'target') { renderMidi(); } midiSave(); };
+    });
+  });
+}
+if (PLUG) {
+  $('midiBtn').style.display = '';
+  $('midiBtn').onclick = function () { learnRow = -1; renderMidi(); $('midiModal').classList.add('show'); };
+  $('midiClose').onclick = function () { learnRow = -1; $('midiModal').classList.remove('show'); };
+  if (PLUG.on) PLUG.on('dhmidi', function (o) {
+    $('midiLast').textContent = 'last controller: CC ' + o.cc + ' = ' + o.v;
+    if (learnRow >= 0 && midiCfg.ccs[learnRow]) { midiCfg.ccs[learnRow].cc = o.cc; learnRow = -1; midiSave(); if ($('midiModal').classList.contains('show')) renderMidi(); }
+  });
+}
+
 // ---------------- boot ----------------
 if (PLUG) { ctx = { plugin: true, sampleRate: SR, currentTime: 0, state: 'running', resume: function () {} }; engineKind = 'Plugin engine'; }
 fillPresets();

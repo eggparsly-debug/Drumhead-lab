@@ -48,6 +48,9 @@ public:
     juce::String storeJson() const;
     double uiSampleRate() const { return currentSr > 0 ? currentSr : 48000; }
     bool hasInstrument() const { return instrumentReady.load(); }
+    // MIDI learn: every incoming CC bumps the counter, the editor forwards it to the page
+    std::atomic<int> lastCcSeq { 0 }, lastCc { -1 }, lastCcVal { 0 };
+    static constexpr int kPieceOuts = 12;
 
     juce::AudioProcessorValueTreeState params;
 
@@ -84,7 +87,6 @@ private:
     double roomS = 0, masterS = 0.85;
 
     std::atomic<float>* outGainDb = nullptr;
-    std::atomic<float>* pedalCC = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DrumheadProcessor)
 };

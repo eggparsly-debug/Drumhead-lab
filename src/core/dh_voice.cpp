@@ -106,6 +106,14 @@ public:
         WkcE = jmin(Wkc, 14 / (dt * dt * yW));
         mixB = md0.mix.num("batter"); mixR = md0.mix.num("reso"); mixS = md0.mix.num("shell");
         gClk = 1 - std::exp(-TAU * 5500 / sr);
+        w2b = w2; double p0 = pitch; pitch = 1; setPitch(p0);
+    }
+
+    void setPitch(double ratio) override
+    {
+        if (ratio == pitch) return;
+        pitch = ratio; double r2 = ratio * ratio, lim = (1.95 / dt) * (1.95 / dt);
+        for (size_t i = 0; i < w2.size() && i < w2b.size(); i++) w2[i] = std::min(w2b[i] * r2, lim);
     }
 
     void strike(double r, double theta, double vel, const std::string& mode, const Mallet*) override
@@ -348,6 +356,7 @@ private:
     }
 
     double sr; int nModes = 0, nB = 0, os = 1; double dt = 0; bool haveQ = false;
+    std::vector<double> w2b;
     std::vector<double> q, v, w2, a2, invM, S, rimF, tmw, frac, oB, oR, cSn, chW, oHL, oHR;
     std::vector<int> zIdx, tIdx;
     double Ycav = 0, tmCoef = 0, sgnSn = 1, mcL = 0, mcR = 0, moh = 0;

@@ -117,6 +117,9 @@ public:
     virtual void bowPressure(double) {}
     virtual void bowStop() {}
     virtual bool bowOn() const { return false; }
+    // live retune (pitch bend): every mode's frequency times `ratio`, kept inside the integrator's stable range
+    virtual void setPitch(double ratio) = 0;
+    double pitch = 1;
 
     std::shared_ptr<Model> model;
     std::vector<Contact> mallets;
@@ -186,7 +189,7 @@ struct Slot {
 class Kit {
 public:
     explicit Kit(double sr);
-    struct Piece { std::unique_ptr<Player> player; double level = 1, pan = 0, lp = 0, drive = 0, recv = 1; bool drum = false, hat = false; };
+    struct Piece { std::unique_ptr<Player> player; double level = 1, pan = 0, lp = 0, drive = 0, recv = 1, rOv = NAN; bool drum = false, hat = false; };
     void setPiece(int i, std::shared_ptr<Model> m, const double* level, const double* pan);
     void setMix(int i, const double* level, const double* pan);
     void trim(int n);
@@ -197,7 +200,11 @@ public:
     void choke(int i, double v);
     void cc(int num, double v);
     void reset();
-    void process(float* L, int n, float* R);
+    // outL/outR (optional, one entry per piece): a piece with its own output skips the main mix and the kit bus
+    void process(float* L, int n, float* R, float* const* outL = nullptr, float* const* outR = nullptr, int nOut = 0);
+    void setStrikePos(int piece, double r);        // NaN = back to each note's own position
+    void pedalPiece(int piece, double down);       // a hi-hat pedal CC aimed at one piece
+    void setPitch(int piece, double ratio);
     // real-time-safe edits used by the plugin host (no allocation on the audio thread)
     std::unique_ptr<Player> swapPiece(int i, std::unique_ptr<Player> p, const double* level, const double* pan);
     void trimInto(int n, std::vector<std::unique_ptr<Player>>& out);

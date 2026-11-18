@@ -4,14 +4,22 @@
 
 static const char* kDefaultKit = "Studio kit (pop / rock)";
 
+// main stereo out + one stereo out per kit piece (off until enabled in the host; a piece with its own output
+// leaves the main mix)
+static juce::AudioProcessor::BusesProperties makeBuses()
+{
+    auto b = juce::AudioProcessor::BusesProperties().withOutput("Main", juce::AudioChannelSet::stereo(), true);
+    for (int i = 1; i <= DrumheadProcessor::kPieceOuts; i++) b = b.withOutput("Piece " + juce::String(i), juce::AudioChannelSet::stereo(), false);
+    return b;
+}
+
 DrumheadProcessor::DrumheadProcessor()
-    : AudioProcessor(BusesProperties().withOutput("Main", juce::AudioChannelSet::stereo(), true)),
+    : AudioProcessor(makeBuses()),
       params(*this, nullptr, "params", createLayout())
 {
     auto kits = dh::Json::parse(std::string(BinaryData::kits_json, (size_t) BinaryData::kits_jsonSize));
     factoryKitJson = juce::String::fromUTF8(kits.get(kDefaultKit).dump().c_str());
     outGainDb = params.getRawParameterValue("out");
-    pedalCC = params.getRawParameterValue("pedalcc");
     ensureDefaultStore();
     worker = std::thread([this] { workerLoop(); });
     startTimerHz(20);
@@ -32,7 +40,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumheadProcessor::createLay
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
     p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { "out", 1 }, "Output", juce::NormalisableRange<float>(-24.f, 12.f, 0.1f), 0.f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
-    p.push_back(std::make_unique<juce::AudioParameterInt>(juce::ParameterID { "pedalcc", 1 }, "Hi-hat pedal CC", 1, 119, 1));
     return { p.begin(), p.end() };
 }
 
@@ -102,8 +109,12 @@ void DrumheadProcessor::queueRestore()
             auto key = md == "kit" ? "drumlab.kit" : "drumlab.cfg";
             data = dh::Json::parse(store.count(key) ? store[key].toStdString() : std::string());
         }
+        dh::Json midiJ;
+        { const juce::ScopedLock sl(storeLock); if (store.count("drumlab.midi")) midiJ = dh::Json::parse(store["drumlab.midi"].toStdString()); }
         std::lock_guard<std::mutex> l(hostMutex);
-        if (!host || !data.isObj()) return;
+        if (!host) return;
+        auto mc = std::make_unique<dh::Cmd>(); mc->kind = dh::Cmd::Midi; mc->midi = dh::parseMidiMap(midiJ); push(std::move(mc));
+        if (!data.isObj()) return;
         for (auto& c : host->prepareFromStore(mode, data)) push(std::move(c));
     });
 }
@@ -143,7 +154,12 @@ void DrumheadProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 bool DrumheadProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
-    return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
+    for (int i = 1; i < layouts.outputBuses.size(); i++) {
+        auto s = layouts.outputBuses[i];
+        if (!s.isDisabled() && s != juce::AudioChannelSet::stereo()) return false;
+    }
+    return true;
 }
 
 void DrumheadProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
@@ -168,32 +184,49 @@ void DrumheadProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         }
     }
 
-    auto* L = buffer.getWritePointer(0);
-    auto* R = buffer.getWritePointer(1);
-    const int pedalNum = (int) pedalCC->load();
+    auto mainBuf = getBusBuffer(buffer, false, 0);
+    auto* L = mainBuf.getWritePointer(0);
+    auto* R = mainBuf.getWritePointer(1);
+    float* oL[kPieceOuts] = {}; float* oR[kPieceOuts] = {}; int nOut = 0;
+    for (int i = 0; i < kPieceOuts && i + 1 < getBusCount(false); i++) {
+        auto* bus = getBus(false, i + 1);
+        if (bus && bus->isEnabled() && bus->getNumberOfChannels() == 2) {
+            auto b = getBusBuffer(buffer, false, i + 1); oL[i] = b.getWritePointer(0); oR[i] = b.getWritePointer(1); nOut = i + 1;
+        }
+    }
+    auto run = [&](int at, int len) {
+        float* pl[kPieceOuts]; float* pr[kPieceOuts];
+        for (int i = 0; i < nOut; i++) { pl[i] = oL[i] ? oL[i] + at : nullptr; pr[i] = oR[i] ? oR[i] + at : nullptr; }
+        H.process(L + at, R + at, len, nOut ? pl : nullptr, nOut ? pr : nullptr, nOut);
+    };
     int pos = 0;
     for (const auto meta : midi) {
         const auto m = meta.getMessage();
         int at = juce::jlimit(pos, n, meta.samplePosition);
-        if (at > pos) { H.process(L + pos, R + pos, at - pos); pos = at; }
+        if (at > pos) { run(pos, at - pos); pos = at; }
         if (m.isNoteOn()) H.noteOn(m.getNoteNumber(), m.getFloatVelocity());
         else if (m.isNoteOff()) H.noteOff(m.getNoteNumber());
         else if (m.isAftertouch()) H.polyPressure(m.getNoteNumber(), m.getAfterTouchValue() / 127.0);
         else if (m.isChannelPressure()) H.channelPressure(m.getChannelPressureValue() / 127.0);
-        else if (m.isController()) H.controller(m.getControllerNumber(), m.getControllerValue() / 127.0, pedalNum);
+        else if (m.isController()) {
+            H.controller(m.getControllerNumber(), m.getControllerValue() / 127.0);
+            lastCc = m.getControllerNumber(); lastCcVal = m.getControllerValue(); lastCcSeq++;
+        }
+        else if (m.isPitchWheel()) H.pitchBend(juce::jlimit(-1.0, 1.0, (m.getPitchWheelValue() - 8192) / 8191.0));
     }
-    if (pos < n) H.process(L + pos, R + pos, n - pos);
+    if (pos < n) run(pos, n - pos);
 
     // bus (as the page's Web Audio graph): dry + room (high-passed at 120 Hz, convolved), master, soft clip
     if (wet.getNumSamples() < n) return;
     for (int ch = 0; ch < 2; ch++) {
-        auto* src = buffer.getReadPointer(ch); auto* w = wet.getWritePointer(ch);
+        auto* src = mainBuf.getReadPointer(ch); auto* w = wet.getWritePointer(ch);
         for (int i = 0; i < n; i++) w[i] = roomHP[ch].run(src[i]);
     }
     juce::dsp::AudioBlock<float> wb(wet.getArrayOfWritePointers(), 2, (size_t) n);
     conv.process(juce::dsp::ProcessContextReplacing<float>(wb));
     const double kS = 1 - std::exp(-1.0 / (0.02 * currentSr));   // setTargetAtTime(..., 0.02)
     const float outG = juce::Decibels::decibelsToGain(outGainDb->load());
+    for (int i = 0; i < nOut; i++) if (oL[i] && outG != 1.f) for (int k = 0; k < n; k++) { oL[i][k] *= outG; oR[i][k] *= outG; }
     auto* wl = wet.getReadPointer(0); auto* wr = wet.getReadPointer(1);
     for (int i = 0; i < n; i++) {
         roomS += kS * (H.room - roomS); masterS += kS * (H.master - masterS);

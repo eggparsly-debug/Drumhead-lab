@@ -14,6 +14,23 @@ static Stroke strokeOf(const Json& s)
     st.tongue = s.get("tongue").isNullish() ? -1 : (int) s.num("tongue");
     return st;
 }
+MidiMap parseMidiMap(const Json& j)
+{
+    MidiMap m;
+    if (!j.isObj()) { m.nCc = 2; m.ccs[0].cc = 4; m.ccs[1].cc = 1; return m; }
+    m.velCurve = jmax(-1, jmin(1, j.nn("velCurve", 0)));
+    m.bendRange = jmax(0, jmin(24, j.nn("bendRange", 2)));
+    m.bendPiece = (int) j.nn("bendPiece", -1);
+    const Json& cs = j.get("ccs");
+    for (size_t i = 0; i < cs.size() && m.nCc < 16; i++) {
+        const Json& e = cs.at(i); int cc = (int) e.nn("cc", -1); if (cc < 0 || cc > 127) continue;
+        std::string t = e.str("target", "pedal");
+        MidiMap::Cc& x = m.ccs[m.nCc++]; x.cc = cc; x.piece = (int) e.nn("piece", -1); x.invert = e.truthy("invert");
+        x.target = t == "strike" ? MidiMap::Strike : t == "choke" ? MidiMap::Choke : MidiMap::Pedal;
+    }
+    return m;
+}
+
 static std::string noteId(int note) { return "n" + std::to_string(note); }
 
 static std::unique_ptr<NoteMap> makeNoteMap(const Model& m)
@@ -38,7 +55,8 @@ static std::unique_ptr<NoteMap> makeNoteMap(const Model& m)
                 bool shoulder = pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10;
                 s.r = R[pc]; s.mode = shoulder ? "shoulder" : "head";
             } else {
-                if (pc == 11) { s.r = 0.93; s.mode = "rimshot"; } else { s.r = pc / 10.0 * 0.95; s.mode = "head"; }
+                if (pc == 11) { s.r = 0.97; s.mode = "rim"; }   /* B: the bare rim (stick on the hoop only) */
+                else { s.r = pc / 10.0 * 0.95; s.mode = "head"; }
             }
         }
         nm->valid[note] = ok; nm->st[note] = s; if (ok) nm->any = true;
@@ -123,6 +141,7 @@ std::unique_ptr<Cmd> Host::prepare(const Json& d)
         if (k.isNum()) { c->kind = Cmd::PedalValue; c->v = k.n; } else { c->kind = Cmd::Pedal; c->kind2 = k.s; }
     }
     else if (t == "bus") { c->kind = Cmd::Bus; c->v = d.num("room"); c->v2 = d.num("master"); }
+    else if (t == "midicfg") { c->kind = Cmd::Midi; c->midi = parseMidiMap(d.get("cfg")); }
     else return nullptr;
     return c;
 }
@@ -151,12 +170,12 @@ void Host::apply(Cmd& c)
     switch (c.kind) {
         case Cmd::Single:
             c.oldPlayer = std::move(single); single = std::move(c.player); single->punch = pu;
-            c.oldNotes = std::move(notes); notes = std::move(c.notes);
+            c.oldNotes = std::move(notes); notes = std::move(c.notes); applyPitch();
             break;
         case Cmd::Mode: kitOn = c.flag; if (!kitOn && kit) kit->reset(); break;
-        case Cmd::SetKit: c.oldKit = std::move(kit); kit = std::move(c.kit); kitOn = true; if (havePunch) kit->punch = kv; break;
+        case Cmd::SetKit: c.oldKit = std::move(kit); kit = std::move(c.kit); kitOn = true; if (havePunch) kit->punch = kv; applyPitch(); break;
         case Cmd::KPiece:
-            if (kit) c.oldPlayer = kit->swapPiece(c.i, std::move(c.player), c.hasLevel ? &c.level : nullptr, c.hasPan ? &c.pan : nullptr);
+            if (kit) { c.oldPlayer = kit->swapPiece(c.i, std::move(c.player), c.hasLevel ? &c.level : nullptr, c.hasPan ? &c.pan : nullptr); applyPitch(); }
             break;
         case Cmd::KTrim: if (kit) kit->trimInto(c.n, c.oldPlayers); break;
         case Cmd::KMix:
@@ -182,12 +201,14 @@ void Host::apply(Cmd& c)
         case Cmd::Pedal: if (single) single->pedal(c.kind2); break;
         case Cmd::PedalValue: if (single) single->pedalValue(c.v); break;
         case Cmd::Bus: room = c.v; master = c.v2; break;
+        case Cmd::Midi: midi = c.midi; strikeOv = NAN; if (kit) for (int i = 0; i < (int) kit->pieces.size(); i++) kit->setStrikePos(i, NAN); applyPitch(); break;
         default: break;
     }
 }
 
 void Host::noteOn(int note, double vel)
 {
+    if (midi.velCurve) vel = std::pow(jmax(0, jmin(1, vel)), std::pow(3.0, -midi.velCurve));
     vel = jmax(0.02, vel);
     if (kitOn && kit) { kit->noteOn(note, vel); return; }
     if (!single || !notes || note < 0 || note > 127) return;
@@ -197,6 +218,7 @@ void Host::noteOn(int note, double vel)
     }
     if (!notes->valid[note]) return;
     Stroke s = notes->st[note]; s.vel = vel;
+    if (strikeOv == strikeOv && s.tongue < 0 && (s.mode == "head" || s.mode == "shoulder")) s.r = strikeOv;
     single->noteOn(noteId(note), s);
 }
 void Host::noteOff(int note)
@@ -217,15 +239,37 @@ void Host::channelPressure(double v)
     if (kitOn && kit) { kit->pressure(nullptr, v); return; }
     if (single) single->pressure(nullptr, v);
 }
-void Host::controller(int cc, double v, int pedalCC)
+void Host::controller(int cc, double v)
 {
-    int num = (cc == 4 || cc == pedalCC) ? 4 : cc == 1 ? 1 : -1;
-    if (num < 0) return;
-    if (kitOn && kit) kit->cc(num, v); else if (single) single->cc(num, v);
+    if (cc == 120 || cc == 123) { if (cc == 120) { if (single) single->reset(); if (kit) kit->reset(); } return; }   // all sound off / all notes off
+    bool used = false; bool k = kitOn && kit;
+    for (int i = 0; i < midi.nCc; i++) {
+        const MidiMap::Cc& e = midi.ccs[i]; if (e.cc != cc) continue;
+        used = true; double x = e.invert ? 1 - v : v;
+        if (e.target == MidiMap::Pedal) {
+            if (k) { if (e.piece < 0) kit->cc(4, x); else kit->pedalPiece(e.piece, x); }
+            else if (single) single->cc(4, x);
+        } else if (e.target == MidiMap::Strike) {
+            double r = 0.02 + 0.93 * x;   // 0: centre (bell on a cymbal), 1: edge
+            if (k) { if (e.piece < 0) { for (int p = 0; p < (int) kit->pieces.size(); p++) kit->setStrikePos(p, r); } else kit->setStrikePos(e.piece, r); }
+            else strikeOv = r;
+        } else {
+            if (k) { if (e.piece < 0) { for (int p = 0; p < (int) kit->pieces.size(); p++) kit->choke(p, x); } else kit->choke(e.piece, x); }
+            else if (single) single->choke(x);
+        }
+    }
+    if (!used && cc == 1) { if (k) kit->cc(1, v); else if (single) single->cc(1, v); }   // unassigned mod wheel: roll speed, as before
 }
-void Host::process(float* L, float* R, int n)
+void Host::pitchBend(double b) { if (b == bend) return; bend = b; applyPitch(); }
+void Host::applyPitch()
 {
-    if (kitOn && kit) kit->process(L, n, R);
+    double ratio = std::pow(2.0, bend * midi.bendRange / 12);
+    if (kit) for (int p = 0; p < (int) kit->pieces.size(); p++) kit->setPitch(p, midi.bendPiece < 0 || midi.bendPiece == p ? ratio : 1);
+    if (single && single->core) single->core->setPitch(ratio);
+}
+void Host::process(float* L, float* R, int n, float* const* outL, float* const* outR, int nOut)
+{
+    if (kitOn && kit) kit->process(L, n, R, outL, outR, nOut);
     else if (single) single->process(L, n, R);
     else for (int i = 0; i < n; i++) L[i] = R[i] = 0;
 }

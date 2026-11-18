@@ -299,6 +299,8 @@ void Kit::noteOn(int note, double vel)
     if (!s->pedal.empty()) { P_.pedal(s->pedal); hold(); return; }
     if (s->open == s->open && pieces[s->p].hat) P_.pedalValue(s->open);
     Stroke st; st.r = s->r; st.theta = s->theta; st.vel = vel; st.mode = s->mode.empty() ? "head" : s->mode;
+    double ov = pieces[s->p].rOv;
+    if (ov == ov && (st.mode == "head" || st.mode == "shoulder")) st.r = ov;   // strike-position CC
     if (s->tongue >= 0) { st = Stroke(); st.tongue = s->tongue; st.vel = vel; }
     P_.noteOn("n" + std::to_string(note), st); hold();
 }
@@ -319,8 +321,13 @@ void Kit::choke(int i, double v) { if (i >= 0 && i < (int) pieces.size() && piec
 void Kit::cc(int num, double v) { for (auto& pc : pieces) if (pc.player && (num != 4 || pc.hat)) pc.player->cc(num, v); }
 void Kit::reset() { for (auto& pc : pieces) if (pc.player) { pc.player->reset(); pc.lp = 0; pc.drive = 0; } held.clear(); }
 
-void Kit::process(float* L, int n, float* R)
+void Kit::setStrikePos(int piece, double r) { if (piece >= 0 && piece < (int) pieces.size()) pieces[piece].rOv = r; }
+void Kit::pedalPiece(int piece, double down) { if (piece >= 0 && piece < (int) pieces.size() && pieces[piece].player) pieces[piece].player->cc(4, down); }
+void Kit::setPitch(int piece, double ratio) { if (piece >= 0 && piece < (int) pieces.size() && pieces[piece].player && pieces[piece].player->core) pieces[piece].player->core->setPitch(ratio); }
+
+void Kit::process(float* L, int n, float* R, float* const* outL, float* const* outR, int nOut)
 {
+    for (int i = 0; i < nOut; i++) if (outL && outL[i]) for (int z = 0; z < n; z++) { outL[i][z] = 0; outR[i][z] = 0; }
     for (int z = 0; z < n; z++) { L[z] = 0; R[z] = 0; }
     int done = 0; const int BL = 64; int np = (int) pieces.size(); double g = 1 - std::exp(-TAU * 160 / sr);
     while (done < n) {
@@ -336,6 +343,14 @@ void Kit::process(float* L, int n, float* R)
             P_.process(tL, len, tR);
             double pn = jmax(-1, jmin(1, pc.pan)), gl = pc.level * std::cos((pn + 1) * PI / 4) * std::sqrt(2.0), gr = pc.level * std::sin((pn + 1) * PI / 4) * std::sqrt(2.0);
             double lp = pc.lp, acc = 0;
+            float* dL = (outL && i < nOut && outL[i]) ? outL[i] : nullptr; float* dR = dL ? outR[i] : nullptr;
+            if (dL) {   // own output: level, pan and the kit's output gain, no bus processing
+                double og = out != out ? 0.75 : out;
+                for (int k = 0; k < len; k++) {
+                    double l = tL[k], r = tR[k]; dL[done + k] = (float) Player::soft(l * gl * og); dR[done + k] = (float) Player::soft(r * gr * og);
+                    lp += g * (0.5 * (l + r) - lp); acc += lp;
+                }
+            } else
             for (int k = 0; k < len; k++) {
                 double l = tL[k], r = tR[k]; L[done + k] = (float) (L[done + k] + l * gl); R[done + k] = (float) (R[done + k] + r * gr);
                 lp += g * (0.5 * (l + r) - lp); acc += lp;

@@ -17,7 +17,8 @@ juce::String bridgeScript(DrumheadProcessor& p)
       << "      getItem: function (k) { return Object.prototype.hasOwnProperty.call(S, k) ? S[k] : null; },\n"
       << "      setItem: function (k, v) { v = String(v); if (S[k] === v) return; S[k] = v; emit('dhstore', { k: k, v: v }); }\n"
       << "    },\n"
-      << "    send: function (m) { emit('dhmsg', { s: JSON.stringify(m) }); }\n"
+      << "    send: function (m) { emit('dhmsg', { s: JSON.stringify(m) }); },\n"
+      << "    on: function (id, fn) { try { window.__JUCE__.backend.addEventListener(id, fn); } catch (e) {} }\n"
       << "  };\n"
       << "})();\n";
     return s;
@@ -57,11 +58,22 @@ DrumheadEditor::DrumheadEditor(DrumheadProcessor& p) : AudioProcessorEditor(p), 
     addAndMakeVisible(web);
     web.goToURL(juce::WebBrowserComponent::getResourceProviderRoot());
     setResizable(true, true);
-    setResizeLimits(900, 600, 2600, 1800);
-    setSize(1360, 860);
+    setResizeLimits(820, 540, 2600, 1800);
+    setSize(1180, 740);
+    startTimerHz(30);
 }
 
-DrumheadEditor::~DrumheadEditor() = default;
+DrumheadEditor::~DrumheadEditor() { stopTimer(); }
+
+void DrumheadEditor::timerCallback()   // MIDI learn: tell the page about controllers as they arrive
+{
+    int seq = proc.lastCcSeq.load();
+    if (seq == seenCc) return;
+    seenCc = seq;
+    juce::DynamicObject::Ptr o = new juce::DynamicObject();
+    o->setProperty("cc", proc.lastCc.load()); o->setProperty("v", proc.lastCcVal.load());
+    web.emitEventIfBrowserIsVisible("dhmidi", juce::var(o.get()));
+}
 
 void DrumheadEditor::paint(juce::Graphics& g) { g.fillAll(juce::Colour(0xff15171c)); }
 void DrumheadEditor::resized() { web.setBounds(getLocalBounds()); }

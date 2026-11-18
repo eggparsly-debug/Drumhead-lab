@@ -6,7 +6,7 @@ class DrumheadProcessor;
 
 // The plugin window is the Drumhead Lab builder page itself (the same page as the browser prototype), shown in
 // an embedded WebView2. The page sends its engine messages and settings here instead of to Web Audio.
-class DrumheadEditor : public juce::AudioProcessorEditor {
+class DrumheadEditor : public juce::AudioProcessorEditor, private juce::Timer {
 public:
     explicit DrumheadEditor(DrumheadProcessor&);
     ~DrumheadEditor() override;
@@ -15,6 +15,8 @@ public:
 
 private:
     static juce::WebBrowserComponent::Options makeOptions(DrumheadProcessor&);
+    void timerCallback() override;
+    int seenCc = 0;
     DrumheadProcessor& proc;
     juce::WebBrowserComponent web;
 };
