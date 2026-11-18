@@ -74,7 +74,7 @@ void DrumheadEditor::resized()
     row.removeFromLeft(12);
     status.setBounds(row);
     r.removeFromTop(10);
-    for (auto* pr : { std::make_pair(&outLabel, &outSlider), std::make_pair(&pedalLabel, &pedalSlider), std::make_pair(&velLabel, &velSlider) }) {
+    for (auto pr : { std::make_pair(&outLabel, &outSlider), std::make_pair(&pedalLabel, &pedalSlider), std::make_pair(&velLabel, &velSlider) }) {
         auto line = r.removeFromTop(28);
         pr.first->setBounds(line.removeFromLeft(130));
         pr.second->setBounds(line.removeFromLeft(360));
