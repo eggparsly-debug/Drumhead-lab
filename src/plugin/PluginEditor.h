@@ -1,0 +1,11 @@
+#pragma once
+#include <juce_audio_processors/juce_audio_processors.h>
+
+class DrumheadProcessor;
+
+class DrumheadEditor : public juce::AudioProcessorEditor {
+public:
+    explicit DrumheadEditor(DrumheadProcessor&);
+    void paint(juce::Graphics&) override;
+    void resized() override {}
+};
