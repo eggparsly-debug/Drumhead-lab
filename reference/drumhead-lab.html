@@ -2236,6 +2236,8 @@ if (typeof module !== 'undefined' && module.exports && !module.exports.HEAD_MATS
 (function () {
 'use strict';
 var E = DrumEngine, P = DRUM_PRESETS;
+// inside the VST: the plugin hosts this page; sound comes from the native engine, settings are saved in the project
+var PLUG = window.__DH_PLUGIN || null, LS = PLUG ? PLUG.store : (function () { try { return window.localStorage || null; } catch (e) { return null; } })() || { getItem: function () { return null; }, setItem: function () {} };
 var $ = function (id) { return document.getElementById(id); };
 var clone = function (o) { return JSON.parse(JSON.stringify(o)); };
 var NOTE = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
@@ -2249,10 +2251,10 @@ function toast(msg) { var t = $('toast'); t.textContent = msg; t.classList.add('
 // ---------------- state ----------------
 var DEFAULT = 'Maple snare 14×5.5';
 var cfg, presetName = DEFAULT;
-try { var saved = localStorage.getItem('drumlab.cfg'); if (saved) { cfg = JSON.parse(saved); presetName = localStorage.getItem('drumlab.preset') || ''; } } catch (e) {}
+try { var saved = LS.getItem('drumlab.cfg'); if (saved) { cfg = JSON.parse(saved); presetName = LS.getItem('drumlab.preset') || ''; } } catch (e) {}
 if (cfg && cfg.kind === 'none') { cfg = null; }
 if (!cfg || !cfg.shell) { cfg = clone(P[DEFAULT]); presetName = DEFAULT; }
-var SR = 48000, model = null, shapes = null;
+var SR = PLUG ? PLUG.sr : 48000, model = null, shapes = null;
 
 function get(path) { return path.split('.').reduce(function (o, k) { return o == null ? undefined : o[k]; }, cfg); }
 function set(path, v) { var ks = path.split('.'), o = cfg; for (var i = 0; i < ks.length - 1; i++) { if (o[ks[i]] == null) o[ks[i]] = {}; o = o[ks[i]]; } o[ks[ks.length - 1]] = v; }
@@ -2400,7 +2402,7 @@ var SCHEMA = [
   ] }
 ];
 var closed = {};
-try { closed = JSON.parse(localStorage.getItem('drumlab.closed') || '{}'); } catch (e) {}
+try { closed = JSON.parse(LS.getItem('drumlab.closed') || '{}'); } catch (e) {}
 
 function lbl(it) { return typeof it.label === 'function' ? it.label(cfg) : it.label; }
 function toSlider(it, v) { return it.log ? 1000 * Math.log(v / it.min) / Math.log(it.max / it.min) : v; }
@@ -2417,7 +2419,7 @@ function buildPanel() {
     if (sec.show && !sec.show(cfg)) return;
     var d = document.createElement('div'); d.className = 'sec' + (closed[sec.sec] ? ' closed' : '');
     var h = document.createElement('h3'); h.innerHTML = (sec.title ? sec.title(cfg) : sec.sec) + '<i>' + (closed[sec.sec] ? '+' : '−') + '</i>';
-    h.onclick = function () { closed[sec.sec] = !closed[sec.sec]; try { localStorage.setItem('drumlab.closed', JSON.stringify(closed)); } catch (e) {} buildPanel(); };
+    h.onclick = function () { closed[sec.sec] = !closed[sec.sec]; try { LS.setItem('drumlab.closed', JSON.stringify(closed)); } catch (e) {} buildPanel(); };
     d.appendChild(h);
     var rows = document.createElement('div'); rows.className = 'rows';
     sec.items.forEach(function (it) {
@@ -2531,7 +2533,7 @@ function changed(it, structural) {
   if (structural) buildPanel();
   scheduleRebuild();
 }
-function save() { try { if (kitMode) { localStorage.setItem('drumlab.kit', JSON.stringify(kit)); localStorage.setItem('drumlab.mode', 'kit'); return; } localStorage.setItem('drumlab.mode', 'single'); localStorage.setItem('drumlab.cfg', JSON.stringify(cfg)); localStorage.setItem('drumlab.preset', presetName); } catch (e) {} }
+function save() { try { if (kitMode) { LS.setItem('drumlab.kit', JSON.stringify(kit)); LS.setItem('drumlab.mode', 'kit'); return; } LS.setItem('drumlab.mode', 'single'); LS.setItem('drumlab.cfg', JSON.stringify(cfg)); LS.setItem('drumlab.preset', presetName); } catch (e) {} }
 
 // ---------------- model + audio ----------------
 var rebuildT = null;
@@ -2548,7 +2550,7 @@ function rebuild() {
 }
 
 var ctx = null, node = null, spVoice = null, busDry, busWet, master, conv, punch, makeup, parDry, engineKind = '';
-function post(msg) { if (node && node.port) node.port.postMessage(msg); else if (spHost) spHost.msg(msg); }
+function post(msg) { if (PLUG) { if (PLUG.live) PLUG.send(msg); return; } if (node && node.port) node.port.postMessage(msg); else if (spHost) spHost.msg(msg); }
 function sendCfg() {
   if (!model) return;
   if (kitMode) { sendKitPiece(kitSel); return; }
@@ -2615,6 +2617,7 @@ function setBus(o, mx, t) {
   o.makeup.gain.setValueAtTime(0, t); o.parDry.gain.setValueAtTime(1, t);
 }
 function applyBus() {
+  if (PLUG) { var mp = (kitMode ? kit.mix : cfg.mix) || {}; post({ type: 'bus', room: mp.room || 0, master: mp.master == null ? 0.85 : mp.master }); sendPunch(); return; }
   if (!ctx) return; var t = ctx.currentTime, mx = (kitMode ? kit.mix : cfg.mix) || {};
   busWet.gain.setTargetAtTime((mx.room || 0) * 0.9, t, 0.02);
   busDry.gain.setTargetAtTime(1 - 0.3 * (mx.room || 0), t, 0.02);
@@ -3537,7 +3540,7 @@ function midiIn(m) {
     if (d1 === 4) { sendMsg({ type: 'cc', num: 4, v: d2 / 127 }); if (isMetal(cfg)) { cfg.special.pedal = 1 - d2 / 127; refreshPanelValues(); drawProfile(); } }
   }
 }
-try {
+if (PLUG) $('midiTxt').textContent = 'MIDI · from the host'; else try {
   if (navigator.requestMIDIAccess) navigator.requestMIDIAccess().then(function (acc) {
     var bind = function () { var n = 0; acc.inputs.forEach(function (inp) { n++; inp.onmidimessage = midiIn; }); $('midiTxt').textContent = n ? 'MIDI · ' + n + ' input' + (n > 1 ? 's' : '') : 'MIDI · no devices'; };
     bind(); acc.onstatechange = bind;
@@ -3586,7 +3589,7 @@ function kitEnter(k) {
 function kitExit() {
   kitMode = false; $('kitBtn').classList.remove('on'); $('presetSel').title = 'Presets';
   if (ctx) post({ type: 'mode', kit: false });
-  try { localStorage.setItem('drumlab.mode', 'single'); } catch (e) {}
+  try { LS.setItem('drumlab.mode', 'single'); } catch (e) {}
   loadCfg(soloCfg || clone(P[DEFAULT]), soloCfg ? soloName : DEFAULT);
 }
 function afterPieceSwitch() { buildPanel(); syncVel(); computeShapes(); refreshPanelValues(); drawProfile(); drawHead(); fillReadouts(); fillModes(); buildPads(); syncHint(); previewSpectrum(); }
@@ -3785,14 +3788,21 @@ function kitGroove(btn) {
 
 window.__drum = { get kit() { return kit; }, get kitMode() { return kitMode; }, get kitModels() { return kitModels; }, get barRects() { return barRects; }, makeIR: makeIR, buildBus: buildBus, setBus: setBus, get anim() { return anim; }, get shapes() { return shapes; }, get model() { return model; }, get ctx() { return ctx; }, get node() { return node; }, get cfg() { return cfg; } };
 // ---------------- boot ----------------
+if (PLUG) { ctx = { plugin: true, sampleRate: SR, currentTime: 0, state: 'running', resume: function () {} }; engineKind = 'Plugin engine'; }
 fillPresets();
 ['mix', 'strike', 'snare'].forEach(function (k) { cfg[k] = Object.assign({}, clone(P[DEFAULT][k]), cfg[k] || {}); });
 if (!cfg.special) cfg.special = { type: 'none' };
 if (!cfg.mics) cfg.mics = { close: 1, oh: 0.5, width: 0.6, height: 0.9, pan: 0 };
+var bootMode = LS.getItem('drumlab.mode');   // (read before the first rebuild saves 'single' over it)
 buildPanel(); syncVel(); rebuild();
-$('kitBtn').onclick = function () { if (kitMode) kitExit(); else { var saved = null; try { saved = JSON.parse(localStorage.getItem('drumlab.kit') || 'null'); } catch (e) {} kitEnter(saved && saved.pieces ? saved : DK[Object.keys(DK)[0]]); } };
-try { if (localStorage.getItem('drumlab.mode') === 'kit') { var sk = JSON.parse(localStorage.getItem('drumlab.kit') || 'null'); if (sk && sk.pieces) kitEnter(sk); } } catch (e) {}
+$('kitBtn').onclick = function () { if (kitMode) kitExit(); else { var saved = null; try { saved = JSON.parse(LS.getItem('drumlab.kit') || 'null'); } catch (e) {} kitEnter(saved && saved.pieces ? saved : DK[Object.keys(DK)[0]]); } };
+try { if (bootMode === 'kit') { var sk = JSON.parse(LS.getItem('drumlab.kit') || 'null'); if (sk && sk.pieces) kitEnter(sk); } } catch (e) {}
 window.addEventListener('resize', function () { drawHead(); drawProfile(); previewSpectrum(); });
+if (PLUG) {   // go live once the page has finished building (a saved kit is built just after boot); if the plugin already
+  // restored this project's instrument, don't rebuild it just because the window opened
+  var goLive = function () { PLUG.live = true; if (!PLUG.hasInstrument) resendAll(); applyBus(); status(true); };
+  if (kitMode) setTimeout(goLive, 60); else goLive();
+}
 document.fonts && document.fonts.ready.then(function () { drawProfile(); });
 })();
 

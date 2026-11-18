@@ -3,6 +3,7 @@
 //   dhrender groove <kits.json> <kit name> <out.f32>     Studio-kit groove, L/R interleaved float32
 //   dhrender --selftest [reference dir]                  builds every preset and kit, checks output is sane
 #include "dh_drum.h"
+#include "dh_host.h"
 #include "dh_util.h"
 #include <algorithm>
 #include <chrono>
@@ -135,6 +136,17 @@ int main(int argc, char** argv)
     }
     if (cmd == "groove" && argc >= 5) {
         Json KK = Json::parse(readFile(argv[2])); auto x = renderGroove(KK.get(argv[3]), SR); writeF32(argv[4], x); return 0;
+    }
+    if (cmd == "host" && argc >= 4) {   // replay a builder-page message stream (tools/hostcheck.js) through the native host
+        std::ifstream f(argv[2]); std::string line; std::vector<std::pair<long, Json>> st;
+        while (std::getline(f, line)) { Json j = Json::parse(line); if (j.isObj()) st.emplace_back((long) j.num("at"), j.get("msg")); }
+        Host h(SR); long N = (long) jsround(28 * SR); std::vector<float> L(N), R(N); size_t si = 0;
+        for (long b = 0; b < N; b += 64) {
+            while (si < st.size() && st[si].first < b + 64) { auto c = h.prepare(st[si].second); if (c) h.apply(*c); si++; }
+            int n = (int) std::min<long>(64, N - b); h.process(L.data() + b, R.data() + b, n);
+        }
+        std::vector<float> o(2 * N); for (long i = 0; i < N; i++) { o[2 * i] = L[i]; o[2 * i + 1] = R[i]; }
+        writeF32(argv[3], o); return 0;
     }
     std::printf("bad arguments\n"); return 2;
 }

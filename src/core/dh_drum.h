@@ -198,6 +198,11 @@ public:
     void cc(int num, double v);
     void reset();
     void process(float* L, int n, float* R);
+    // real-time-safe edits used by the plugin host (no allocation on the audio thread)
+    std::unique_ptr<Player> swapPiece(int i, std::unique_ptr<Player> p, const double* level, const double* pan);
+    void trimInto(int n, std::vector<std::unique_ptr<Player>>& out);
+    void swapMap(std::vector<std::pair<int, Slot>>& m) { map.swap(m); }
+    static void preparePlayer(Player& p, std::shared_ptr<Model> m);   // what setPiece does to a fresh player
 
     double sr, symp = 0.5, punch = 0, out = NAN;
     std::vector<Piece> pieces;

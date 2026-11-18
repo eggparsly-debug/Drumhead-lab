@@ -8,19 +8,23 @@ DrumheadProcessor::DrumheadProcessor()
     : AudioProcessor(BusesProperties().withOutput("Main", juce::AudioChannelSet::stereo(), true)),
       params(*this, nullptr, "params", createLayout())
 {
-    factoryKits = dh::Json::parse(std::string(BinaryData::kits_json, (size_t) BinaryData::kits_jsonSize));
-    kitName = kDefaultKit;
+    auto kits = dh::Json::parse(std::string(BinaryData::kits_json, (size_t) BinaryData::kits_jsonSize));
+    factoryKitJson = juce::String::fromUTF8(kits.get(kDefaultKit).dump().c_str());
     outGainDb = params.getRawParameterValue("out");
     pedalCC = params.getRawParameterValue("pedalcc");
-    startTimerHz(10);
+    ensureDefaultStore();
+    worker = std::thread([this] { workerLoop(); });
+    startTimerHz(20);
 }
 
 DrumheadProcessor::~DrumheadProcessor()
 {
     stopTimer();
-    builder.removeAllJobs(true, 30000);
-    delete pending.exchange(nullptr);
-    delete trash.exchange(nullptr);
+    { std::lock_guard<std::mutex> l(jobMutex); quit = true; jobs.clear(); }
+    jobCv.notify_all();
+    if (worker.joinable()) worker.join();
+    for (auto* c : toAudio) delete c;
+    timerCallback();
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout DrumheadProcessor::createLayout()
@@ -32,54 +36,109 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumheadProcessor::createLay
     return { p.begin(), p.end() };
 }
 
-juce::StringArray DrumheadProcessor::factoryKitNames() const
+// ---------------- page settings ----------------
+void DrumheadProcessor::ensureDefaultStore()
 {
-    juce::StringArray s; for (auto& kv : factoryKits.o) s.add(juce::String::fromUTF8(kv.first.c_str()));
-    return s;
+    const juce::ScopedLock sl(storeLock);
+    if (store.find("drumlab.mode") == store.end()) {   // a fresh instance opens on the Studio kit
+        store["drumlab.mode"] = "kit";
+        store["drumlab.kit"] = factoryKitJson;
+    }
+}
+void DrumheadProcessor::storeItem(const juce::String& key, const juce::String& value)
+{
+    const juce::ScopedLock sl(storeLock); store[key] = value;
+}
+juce::String DrumheadProcessor::storeJson() const
+{
+    dh::Json o = dh::Json::object();
+    { const juce::ScopedLock sl(storeLock); for (auto& kv : store) o.set(kv.first.toStdString(), dh::Json::string(kv.second.toStdString())); }
+    return juce::String::fromUTF8(o.dump().c_str());
 }
 
-void DrumheadProcessor::loadFactoryKit(const juce::String& name)
+// ---------------- worker ----------------
+void DrumheadProcessor::queueJob(std::function<void()> job)
 {
-    const dh::Json& k = factoryKits.get(name.toStdString());
-    if (!k.isObj()) return;
-    { const juce::ScopedLock sl(infoLock); kitName = name; kitSource = k; }
-    if (currentSr > 0) startBuild(k, currentSr);
+    { std::lock_guard<std::mutex> l(jobMutex); jobs.push_back(std::move(job)); }
+    jobCv.notify_one();
 }
-
-void DrumheadProcessor::startBuild(const dh::Json& kitJson, double sr)
+void DrumheadProcessor::workerLoop()
 {
-    int gen = ++buildGen;
-    { const juce::ScopedLock sl(infoLock); status = "building " + juce::String::fromUTF8(kitJson.str("name").c_str()) + " ..."; }
-    builder.addJob([this, kitJson, sr, gen]() {
-        auto t0 = juce::Time::getMillisecondCounterHiRes();
-        auto inst = dh::buildKit(kitJson, sr);
-        if (gen != buildGen.load()) return;   // superseded by a newer request
-        auto ms = juce::Time::getMillisecondCounterHiRes() - t0;
+    for (;;) {
+        std::function<void()> job;
         {
-            const juce::ScopedLock sl(infoLock);
-            pads = inst->pads; padsVer++;
-            status = juce::String::fromUTF8(inst->name.c_str()) + "  -  ready (" + juce::String((int) ms) + " ms build, " + juce::String((int) sr) + " Hz)";
+            std::unique_lock<std::mutex> l(jobMutex);
+            jobCv.wait(l, [this] { return quit || !jobs.empty(); });
+            if (quit) return;
+            job = std::move(jobs.front()); jobs.pop_front();
         }
-        delete pending.exchange(inst.release());
+        job();
+    }
+}
+void DrumheadProcessor::push(std::unique_ptr<dh::Cmd> c)
+{
+    if (!c) return;
+    if (c->kind == dh::Cmd::Single || c->kind == dh::Cmd::SetKit) instrumentReady = true;
+    std::lock_guard<std::mutex> l(toAudioMutex); toAudio.push_back(c.release());
+}
+void DrumheadProcessor::uiMessage(const juce::String& json)
+{
+    std::string s = json.toStdString();
+    queueJob([this, s] {
+        dh::Json m = dh::Json::parse(s);
+        std::lock_guard<std::mutex> l(hostMutex);
+        if (!host || !m.isObj()) return;
+        push(host->prepare(m));
+    });
+}
+void DrumheadProcessor::queueRestore()
+{
+    queueJob([this] {
+        dh::Json mode, data;
+        {
+            const juce::ScopedLock sl(storeLock);
+            auto md = store.count("drumlab.mode") ? store["drumlab.mode"] : juce::String("single");
+            mode = dh::Json::string(md.toStdString());
+            auto key = md == "kit" ? "drumlab.kit" : "drumlab.cfg";
+            data = dh::Json::parse(store.count(key) ? store[key].toStdString() : std::string());
+        }
+        std::lock_guard<std::mutex> l(hostMutex);
+        if (!host || !data.isObj()) return;
+        for (auto& c : host->prepareFromStore(mode, data)) push(std::move(c));
     });
 }
 
 void DrumheadProcessor::timerCallback()
 {
-    delete trash.exchange(nullptr);   // free retired instruments off the audio thread
+    // free whatever the audio thread retired
+    int n = doneFifo.getNumReady();
+    if (n > 0) {
+        auto rd = doneFifo.read(n);
+        for (int i = 0; i < rd.blockSize1; i++) delete done[(size_t) (rd.startIndex1 + i)];
+        for (int i = 0; i < rd.blockSize2; i++) delete done[(size_t) (rd.startIndex2 + i)];
+    }
 }
 
+// ---------------- audio ----------------
 void DrumheadProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
-    keyboardState.reset();
-    tmpL.assign((size_t) juce::jmax(512, samplesPerBlock), 0.f);
-    tmpR.assign(tmpL.size(), 0.f);
-    if (sampleRate != currentSr) {
-        currentSr = sampleRate;
-        dh::Json k; { const juce::ScopedLock sl(infoLock); k = kitSource; }
-        if (!k.isObj()) { k = factoryKits.get(kDefaultKit); const juce::ScopedLock sl(infoLock); kitSource = k; }
-        startBuild(k, sampleRate);
+    {
+        std::lock_guard<std::mutex> l(hostMutex);
+        if (!host || sampleRate != currentSr) {
+            { std::lock_guard<std::mutex> q(toAudioMutex); for (auto* c : toAudio) delete c; toAudio.clear(); }
+            host = std::make_unique<dh::Host>(sampleRate);   // (audio is stopped while the host prepares us)
+            currentSr = sampleRate; instrumentReady = false;
+            queueRestore();
+        }
     }
+    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) juce::jmax(1, samplesPerBlock), 2 };
+    conv.prepare(spec);
+    auto ir = dh::makeRoomIR(sampleRate);
+    juce::AudioBuffer<float> b(2, (int) ir[0].size());
+    for (int ch = 0; ch < 2; ch++) b.copyFrom(ch, 0, ir[(size_t) ch].data(), (int) ir[(size_t) ch].size());
+    conv.loadImpulseResponse(std::move(b), sampleRate, juce::dsp::Convolution::Stereo::yes, juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::no);
+    wet.setSize(2, juce::jmax(1, samplesPerBlock));
+    for (auto& f : roomHP) { f.highpass(sampleRate, 120, 0.6); f.reset(); }
 }
 
 bool DrumheadProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -92,48 +151,66 @@ void DrumheadProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     juce::ScopedNoDenormals noDenormals;
     const int n = buffer.getNumSamples();
     buffer.clear();
-    keyboardState.processNextMidiBuffer(midi, 0, n, true);   // pads clicked in the editor
+    if (!host) return;
+    dh::Host& H = *host;
 
-    if (pending.load() && trash.load() == nullptr) {
-        if (auto* p = pending.exchange(nullptr)) { trash.store(live.release()); live.reset(p); }
+    // apply what the page / restore prepared, in order
+    {
+        std::unique_lock<std::mutex> l(toAudioMutex, std::try_to_lock);
+        if (l.owns_lock()) {
+            int room = doneFifo.getFreeSpace();
+            while (!toAudio.empty() && room-- > 0) {
+                dh::Cmd* c = toAudio.front(); toAudio.pop_front();
+                H.apply(*c);
+                auto wr = doneFifo.write(1);
+                if (wr.blockSize1) done[(size_t) wr.startIndex1] = c; else done[(size_t) wr.startIndex2] = c;
+            }
+        }
     }
-    if (!live) return;
 
-    if ((int) tmpL.size() < n) return;   // host sent a bigger block than promised: stay silent rather than allocate
     auto* L = buffer.getWritePointer(0);
     auto* R = buffer.getWritePointer(1);
     const int pedalNum = (int) pedalCC->load();
     int pos = 0;
-    auto render = [&](int upTo) {
-        while (pos < upTo) {
-            int len = juce::jmin(upTo - pos, (int) tmpL.size());
-            live->process(tmpL.data(), tmpR.data(), len);
-            std::copy(tmpL.begin(), tmpL.begin() + len, L + pos);
-            std::copy(tmpR.begin(), tmpR.begin() + len, R + pos);
-            pos += len;
-        }
-    };
     for (const auto meta : midi) {
         const auto m = meta.getMessage();
-        render(juce::jlimit(pos, n, meta.samplePosition));
-        if (m.isNoteOn()) live->noteOn(m.getNoteNumber(), m.getFloatVelocity());
-        else if (m.isNoteOff()) live->noteOff(m.getNoteNumber());
-        else if (m.isController()) {
-            int cc = m.getControllerNumber(); double v = m.getControllerValue() / 127.0;
-            if (cc == 4 || cc == pedalNum) live->hatPedal(v);
-        }
+        int at = juce::jlimit(pos, n, meta.samplePosition);
+        if (at > pos) { H.process(L + pos, R + pos, at - pos); pos = at; }
+        if (m.isNoteOn()) H.noteOn(m.getNoteNumber(), m.getFloatVelocity());
+        else if (m.isNoteOff()) H.noteOff(m.getNoteNumber());
+        else if (m.isAftertouch()) H.polyPressure(m.getNoteNumber(), m.getAfterTouchValue() / 127.0);
+        else if (m.isChannelPressure()) H.channelPressure(m.getChannelPressureValue() / 127.0);
+        else if (m.isController()) H.controller(m.getControllerNumber(), m.getControllerValue() / 127.0, pedalNum);
     }
-    render(n);
-    const float g = juce::Decibels::decibelsToGain(outGainDb->load());
-    if (g != 1.f) buffer.applyGain(g);
+    if (pos < n) H.process(L + pos, R + pos, n - pos);
+
+    // bus (as the page's Web Audio graph): dry + room (high-passed at 120 Hz, convolved), master, soft clip
+    if (wet.getNumSamples() < n) return;
+    for (int ch = 0; ch < 2; ch++) {
+        auto* src = buffer.getReadPointer(ch); auto* w = wet.getWritePointer(ch);
+        for (int i = 0; i < n; i++) w[i] = roomHP[ch].run(src[i]);
+    }
+    juce::dsp::AudioBlock<float> wb(wet.getArrayOfWritePointers(), 2, (size_t) n);
+    conv.process(juce::dsp::ProcessContextReplacing<float>(wb));
+    const double kS = 1 - std::exp(-1.0 / (0.02 * currentSr));   // setTargetAtTime(..., 0.02)
+    const float outG = juce::Decibels::decibelsToGain(outGainDb->load());
+    auto* wl = wet.getReadPointer(0); auto* wr = wet.getReadPointer(1);
+    for (int i = 0; i < n; i++) {
+        roomS += kS * (H.room - roomS); masterS += kS * (H.master - masterS);
+        float dry = (float) (1 - 0.3 * roomS), wg = (float) (roomS * 0.9), mg = (float) masterS;
+        L[i] = dh::softClip((L[i] * dry + wl[i] * wg) * mg) * outG;
+        R[i] = dh::softClip((R[i] * dry + wr[i] * wg) * mg) * outG;
+    }
 }
 
 juce::AudioProcessorEditor* DrumheadProcessor::createEditor() { return new DrumheadEditor(*this); }
 
+// ---------------- project state ----------------
 void DrumheadProcessor::getStateInformation(juce::MemoryBlock& dest)
 {
     auto state = params.copyState();
-    { const juce::ScopedLock sl(infoLock); state.setProperty("kit", kitName, nullptr); state.setProperty("kitJson", juce::String::fromUTF8(kitSource.dump().c_str()), nullptr); }
+    state.setProperty("store", storeJson(), nullptr);
+    state.setProperty("version", dh::kVersion, nullptr);
     if (auto xml = state.createXml()) copyXmlToBinary(*xml, dest);
 }
 
@@ -144,13 +221,16 @@ void DrumheadProcessor::setStateInformation(const void* data, int size)
     auto state = juce::ValueTree::fromXml(*xml);
     if (!state.isValid()) return;
     params.replaceState(state);
-    auto js = state.getProperty("kitJson").toString();
-    dh::Json k = dh::Json::parse(js.toStdString());
-    if (!k.isObj()) k = factoryKits.get(state.getProperty("kit").toString().toStdString());
-    if (k.isObj()) {
-        { const juce::ScopedLock sl(infoLock); kitName = state.getProperty("kit").toString(); kitSource = k; }
-        if (currentSr > 0) startBuild(k, currentSr);
+    dh::Json st = dh::Json::parse(state.getProperty("store").toString().toStdString());
+    if (st.isObj()) {
+        const juce::ScopedLock sl(storeLock);
+        store.clear();
+        for (auto& kv : st.o) store[juce::String::fromUTF8(kv.first.c_str())] = juce::String::fromUTF8(kv.second.s.c_str());
     }
+    ensureDefaultStore();
+    instrumentReady = false;
+    std::lock_guard<std::mutex> l(hostMutex);
+    if (host) queueRestore();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new DrumheadProcessor(); }

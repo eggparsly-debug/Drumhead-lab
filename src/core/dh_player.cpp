@@ -241,7 +241,31 @@ void Player::process(float* outL, int n, float* outR)
 }
 
 // ---------------- Kit ----------------
-Kit::Kit(double sr_) : sr(sr_) { tLb.assign(128, 0); tRb.assign(128, 0); }
+Kit::Kit(double sr_) : sr(sr_) { tLb.assign(128, 0); tRb.assign(128, 0); pieces.reserve(16); held.reserve(128); map.reserve(128); }
+
+void Kit::preparePlayer(Player& p, std::shared_ptr<Model> m)
+{
+    p.quietThr = m->piece == "stack" ? 4e-4 : 1.2e-4; p.inKit = true;
+    p.setModel(m); p.gain = m->gain ? m->gain : 1; if (p.core) p.core->kitMode = true;
+}
+std::unique_ptr<Player> Kit::swapPiece(int i, std::unique_ptr<Player> np, const double* level, const double* pan)
+{
+    if (i < 0) return np;
+    if ((int) pieces.size() <= i) { if (i >= (int) pieces.capacity()) return np; pieces.resize(i + 1); }
+    Piece& pc = pieces[i];
+    auto old = std::move(pc.player);
+    if (!old) { pc.level = 1; pc.pan = 0; pc.lp = 0; pc.drive = 0; }
+    const Model& m = *np->model;
+    pc.drum = !m.metal; pc.hat = m.metal && m.piece == "hihat"; pc.recv = m.snareOn ? 0.5 : 1;
+    pc.player = std::move(np);
+    if (level) pc.level = *level;
+    if (pan) pc.pan = *pan;
+    return old;
+}
+void Kit::trimInto(int n, std::vector<std::unique_ptr<Player>>& out)
+{
+    while ((int) pieces.size() > n) { if (out.size() < out.capacity()) out.push_back(std::move(pieces.back().player)); pieces.pop_back(); }
+}
 
 void Kit::setPiece(int i, std::shared_ptr<Model> m, const double* level, const double* pan)
 {

@@ -134,7 +134,13 @@ void dumpTo(const Json& j, std::string& out)
         }
         case Json::Str: {
             out += '"';
-            for (char c : j.s) { if (c == '"' || c == '\\') { out += '\\'; out += c; } else if (c == '\n') out += "\\n"; else out += c; }
+            for (char c : j.s) {
+                unsigned char u = (unsigned char) c;
+                if (c == '"' || c == '\\') { out += '\\'; out += c; }
+                else if (c == '\n') out += "\\n";
+                else if (u < 0x20) { char b[8]; std::snprintf(b, sizeof b, "\\u%04x", u); out += b; }
+                else out += c;
+            }
             out += '"'; break;
         }
         case Json::Arr: {

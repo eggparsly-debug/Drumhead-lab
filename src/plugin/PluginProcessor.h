@@ -1,10 +1,19 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
-#include <juce_audio_basics/juce_audio_basics.h>
-#include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_dsp/juce_dsp.h>
 #include <atomic>
-#include "dh_engine.h"
+#include <condition_variable>
+#include <functional>
+#include <thread>
+#include <deque>
+#include <map>
+#include <mutex>
+#include "dh_host.h"
+#include "dh_room.h"
 
+// The builder page (in the editor) and the project state drive a dh::Host. Messages are turned into commands on
+// a worker thread (model building is slow), handed to the audio thread lock-free, and the objects they replace
+// come back to be freed on the message thread.
 class DrumheadProcessor : public juce::AudioProcessor, private juce::Timer {
 public:
     DrumheadProcessor();
@@ -33,38 +42,49 @@ public:
     void getStateInformation(juce::MemoryBlock&) override;
     void setStateInformation(const void*, int) override;
 
-    // ---- for the editor ----
-    juce::StringArray factoryKitNames() const;
-    void loadFactoryKit(const juce::String& name);
-    juce::String currentKitName() const { const juce::ScopedLock sl(infoLock); return kitName; }
-    juce::String statusText() const { const juce::ScopedLock sl(infoLock); return status; }
-    std::vector<dh::Pad> currentPads() const { const juce::ScopedLock sl(infoLock); return pads; }
-    int padsVersion() const { return padsVer.load(); }
+    // ---- the builder page ----
+    void uiMessage(const juce::String& json);                       // a message for the engine (same protocol as the browser)
+    void storeItem(const juce::String& key, const juce::String& value);   // page settings, saved in the project
+    juce::String storeJson() const;
+    double uiSampleRate() const { return currentSr > 0 ? currentSr : 48000; }
+    bool hasInstrument() const { return instrumentReady.load(); }
 
-    juce::MidiKeyboardState keyboardState;
     juce::AudioProcessorValueTreeState params;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
-    void startBuild(const dh::Json& kitJson, double sr);
     void timerCallback() override;
+    void queueJob(std::function<void()> job);
+    void workerLoop();
+    void queueRestore();
+    void push(std::unique_ptr<dh::Cmd> c);
+    void ensureDefaultStore();
 
-    dh::Json factoryKits;
-    std::unique_ptr<dh::Instrument> live;                 // audio thread only
-    std::atomic<dh::Instrument*> pending { nullptr };    // built, waiting to go live
-    std::atomic<dh::Instrument*> trash { nullptr };      // retired, freed on the message thread
-    juce::ThreadPool builder { 1 };
-    std::atomic<int> buildGen { 0 };
+    // engine (rebuilt when the sample rate changes)
+    std::unique_ptr<dh::Host> host;
+    std::mutex hostMutex;                         // held by the worker while it builds, and by prepareToPlay
     double currentSr = 0;
+    std::atomic<bool> instrumentReady { false };
 
-    juce::CriticalSection infoLock;
-    juce::String kitName, status { "starting" };
-    std::vector<dh::Pad> pads; std::atomic<int> padsVer { 0 };
-    dh::Json kitSource;
+    // commands: worker -> audio (mutex, audio thread only try-locks) and audio -> message thread (lock-free)
+    std::mutex toAudioMutex; std::deque<dh::Cmd*> toAudio;
+    juce::AbstractFifo doneFifo { 1024 }; std::array<dh::Cmd*, 1024> done {};
+
+    // worker thread
+    std::thread worker; std::mutex jobMutex; std::condition_variable jobCv; std::deque<std::function<void()>> jobs; bool quit = false;
+
+    // page settings (localStorage in the browser)
+    mutable juce::CriticalSection storeLock; std::map<juce::String, juce::String> store;
+    juce::String factoryKitJson;
+
+    // bus: room reverb, master, soft clip
+    juce::dsp::Convolution conv { juce::dsp::Convolution::Latency { 0 } };
+    juce::AudioBuffer<float> wet;
+    dh::Biquad roomHP[2];
+    double roomS = 0, masterS = 0.85;
 
     std::atomic<float>* outGainDb = nullptr;
     std::atomic<float>* pedalCC = nullptr;
-    std::vector<float> tmpL, tmpR;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DrumheadProcessor)
 };
