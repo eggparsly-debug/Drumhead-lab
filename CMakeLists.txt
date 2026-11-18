@@ -13,6 +13,7 @@ option(DH_BUILD_TOOLS "Build command-line render/test tools" ON)
 # ---------------------------------------------------------------------------
 file(GLOB DH_CORE_SOURCES CONFIGURE_DEPENDS src/core/*.cpp)
 add_library(dhcore STATIC ${DH_CORE_SOURCES})
+set_target_properties(dhcore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(dhcore PUBLIC src/core)
 if(MSVC)
   target_compile_options(dhcore PRIVATE /O2 /fp:precise)
@@ -50,6 +51,9 @@ if(DH_BUILD_PLUGIN)
     COPY_PLUGIN_AFTER_BUILD FALSE
     VST3_CATEGORIES Instrument Drum)
 
+  juce_add_binary_data(DrumheadData SOURCES reference/kits.json reference/presets.json)
+  set_target_properties(DrumheadData PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
   target_sources(DrumheadLab PRIVATE
     src/plugin/PluginProcessor.cpp
     src/plugin/PluginEditor.cpp)
@@ -61,6 +65,6 @@ if(DH_BUILD_PLUGIN)
     JUCE_DISPLAY_SPLASH_SCREEN=1)
 
   target_link_libraries(DrumheadLab
-    PRIVATE dhcore juce::juce_audio_utils juce::juce_dsp
+    PRIVATE dhcore DrumheadData juce::juce_audio_utils juce::juce_dsp
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
 endif()
