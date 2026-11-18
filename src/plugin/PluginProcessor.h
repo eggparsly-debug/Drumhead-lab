@@ -56,6 +56,7 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    static BusesProperties makeBuses();
     void timerCallback() override;
     void queueJob(std::function<void()> job);
     void workerLoop();

@@ -6,9 +6,9 @@ static const char* kDefaultKit = "Studio kit (pop / rock)";
 
 // main stereo out + one stereo out per kit piece (off until enabled in the host; a piece with its own output
 // leaves the main mix)
-static juce::AudioProcessor::BusesProperties makeBuses()
+juce::AudioProcessor::BusesProperties DrumheadProcessor::makeBuses()
 {
-    auto b = juce::AudioProcessor::BusesProperties().withOutput("Main", juce::AudioChannelSet::stereo(), true);
+    auto b = BusesProperties().withOutput("Main", juce::AudioChannelSet::stereo(), true);
     for (int i = 1; i <= DrumheadProcessor::kPieceOuts; i++) b = b.withOutput("Piece " + juce::String(i), juce::AudioChannelSet::stereo(), false);
     return b;
 }
