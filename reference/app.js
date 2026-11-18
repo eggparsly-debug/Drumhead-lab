@@ -291,6 +291,7 @@ function changed(it, structural) {
   if (it.live) {
     if (it.k === 'mix.room' || it.k === 'mix.master' || it.k === 'mix.punch') applyBus();
     if (it.k === 'strike.r' || it.k === 'strike.mode') drawHead();
+    if ((it.k === 'strike.mode' || it.k === 'strike.theta') && !kitMode) post({ type: 'stroke', mode: cfg.strike.mode, theta: cfg.strike.theta });
     if (it.k === 'strike.vel') syncVel();
     save(); return;
   }
@@ -498,10 +499,20 @@ function playTongue(idx, vel, noVisual) {
 function nearestTongue(note) {
   var best = null, bd = 1e9; model.tongues.forEach(function (t) { var d = Math.abs(t.note - note); if (d < bd) { bd = d; best = t; } }); return best;
 }
+var KEY_MODES = ['head', 'rimshot', 'rimclick', 'rim'];
+// B together with another key = one rimshot where that key lands. A B just after a head stroke adds the hoop crack
+// (the plugin engine plays it as the hoop half of a rimshot; in the browser it is a plain rim hit on top)
+var chordT = { head: -1e9, b: -1e9 };
+function chordStroke(pc, st) {
+  if (!st || isMetal(cfg) || isTg(cfg) || cfg.kind === 'none') return st;
+  var now = performance.now();
+  if (pc === 11) { chordT.b = now; if (now - chordT.head < 40) return { r: st.r, theta: st.theta, vel: st.vel, mode: PLUG ? 'hoop' : 'rim' }; return st; }
+  chordT.head = now; return st;
+}
 // Regular drum: one octave of keys spans the head. C = dead centre ... A# = near the edge, B = the bare rim.
 function drumKeySt(pc, vel) {
   var s = cfg.strike;
-  return pc === 11 ? { r: 0.97, theta: s.theta, vel: vel, mode: 'rim' } : { r: pc / 10 * 0.95, theta: s.theta, vel: vel, mode: 'head' };
+  return pc === 11 ? { r: 0.97, theta: s.theta, vel: vel, mode: 'rim' } : { r: pc / 10 * 0.95, theta: s.theta, vel: vel, mode: KEY_MODES.indexOf(s.mode) >= 0 ? s.mode : 'head' };   // keys play the stroke type chosen in the builder
 }
 // Cymbals: one octave runs bell -> edge. White keys = stick tip, black keys = shoulder (crash-style).
 function metalPos(pc) {
@@ -512,11 +523,11 @@ function metalPos(pc) {
 }
 function metalKeySt(pc, vel) { var p = metalPos(pc); return { r: p.r, theta: cfg.strike.theta, vel: vel, mode: p.mode }; }
 function keySt(pc, vel) { return isMetal(cfg) ? metalKeySt(pc, vel) : drumKeySt(pc, vel); }
-function drumKey(pc, vel) { lightPad('k' + pc); var st = keySt(pc, vel); strike(st.r, st.theta, st.vel, st.mode); }
+function drumKey(pc, vel) { lightPad('k' + pc); var st = chordStroke(pc, keySt(pc, vel)); strike(st.r, st.theta, st.vel, st.mode); }
 function noteSt(note, vel) {
   if (isTg(cfg) && model && model.tongues) { var t = nearestTongue(note); if (t && isBars(cfg) && t.note !== note) return null; return t ? { tongue: t.idx, vel: vel } : null; }   // bars: keys outside the instrument's range stay silent
   if (cfg.kind === 'none' && !isMetal(cfg)) return null;
-  return keySt(((note % 12) + 12) % 12, vel);
+  var pc = ((note % 12) + 12) % 12; return chordStroke(pc, keySt(pc, vel));
 }
 function playNote(note, vel) { var st = noteSt(note, vel); if (st) { if (st.tongue != null) playTongue(st.tongue, vel); else strike(st.r, st.theta, st.vel, st.mode); } }
 function setChoke(v) { chokeHeld = v > 0; sendMsg({ type: 'choke', v: v }); lightPad('choke'); }
@@ -840,7 +851,7 @@ headCv.addEventListener('pointerdown', function (e) {
   if (isMetal(cfg)) {
     if (r > 1.0 && r < 1.2) { setChoke(1); toast('Grabbing the edge — release to let go'); return; }
     if (r >= 1.2) return;
-    cfg.strike.r = Math.min(0.99, r); cfg.strike.theta = th; refreshPanelValues(); save();
+    cfg.strike.r = Math.min(0.99, r); cfg.strike.theta = th; refreshPanelValues(); save(); if (!kitMode) post({ type: 'stroke', mode: cfg.strike.mode, theta: th });
     if (e.shiftKey && !e.altKey) { drawHead(); return; }
     mouseHeld = true; startNote('m', { r: cfg.strike.r, theta: th, vel: cfg.strike.vel, mode: e.altKey ? 'shoulder' : 'head' });
     return;
@@ -921,7 +932,7 @@ function buildPads() {
       padHold(b, 'pk' + pc, function () { lightPad('k' + pc); return drumKeySt(pc, cfg.strike.vel); });
       el.appendChild(b);
     })(pc);
-    $('padHint').innerHTML = 'Each octave spans the head: <b>C</b> hits dead center, each key steps outward, <b>A♯</b> is at the edge and <b>B</b> hits the rim (stick on the hoop only) — on any octave of a MIDI keyboard, or <kbd>A</kbd> <kbd>W</kbd> <kbd>S</kbd> … <kbd>J</kbd> on your computer keyboard.';
+    $('padHint').innerHTML = 'Each octave spans the head: <b>C</b> hits dead center, each key steps outward, <b>A♯</b> is at the edge (each with the stroke type chosen under Strike) and <b>B</b> hits the rim; <b>B</b> with any other key is a rimshot there — on any octave of a MIDI keyboard, or <kbd>A</kbd> <kbd>W</kbd> <kbd>S</kbd> … <kbd>J</kbd> on your computer keyboard.';
   } else { $('padHint').textContent = ''; }
 }
 
@@ -1266,7 +1277,7 @@ document.addEventListener('keydown', function (e) {
   }
   var pk = PIANO.indexOf(e.code);
   if (pk >= 0 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    var st = isTg(cfg) ? noteSt(kbOct * 12 + pk, s.vel) : (pk < 12 ? keySt(pk, s.vel) : null);
+    var st = isTg(cfg) ? noteSt(kbOct * 12 + pk, s.vel) : (pk < 12 ? chordStroke(pk, keySt(pk, s.vel)) : null);
     if (st) { heldKeys[e.code] = true; lightPad(st.tongue != null ? 't' + st.tongue : 'k' + pk); startNote('k' + e.code, st); }
     return;
   }

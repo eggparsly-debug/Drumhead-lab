@@ -38,6 +38,9 @@ static std::unique_ptr<NoteMap> makeNoteMap(const Model& m)
     auto nm = std::make_unique<NoteMap>();
     const Json& cfg = m.cfg; nm->metal = m.metal; nm->hihat = m.metal && m.piece == "hihat";
     double th = cfg.get("strike").orv("theta", 0);
+    std::string sm = cfg.get("strike").str("mode", "head");
+    if (sm != "head" && sm != "rimshot" && sm != "rimclick" && sm != "rim") sm = "head";
+    nm->drum = !m.metal && !m.tongue && cfg.str("kind") != "none";
     for (int note = 0; note < 128; note++) {
         Stroke s; s.theta = th; bool ok = true;
         if (m.tongue && !m.tongues.empty()) {
@@ -56,7 +59,7 @@ static std::unique_ptr<NoteMap> makeNoteMap(const Model& m)
                 s.r = R[pc]; s.mode = shoulder ? "shoulder" : "head";
             } else {
                 if (pc == 11) { s.r = 0.97; s.mode = "rim"; }   /* B: the bare rim (stick on the hoop only) */
-                else { s.r = pc / 10.0 * 0.95; s.mode = "head"; }
+                else { s.r = pc / 10.0 * 0.95; s.mode = sm; }   /* the stroke type chosen in the builder */
             }
         }
         nm->valid[note] = ok; nm->st[note] = s; if (ok) nm->any = true;
@@ -141,6 +144,7 @@ std::unique_ptr<Cmd> Host::prepare(const Json& d)
         if (k.isNum()) { c->kind = Cmd::PedalValue; c->v = k.n; } else { c->kind = Cmd::Pedal; c->kind2 = k.s; }
     }
     else if (t == "bus") { c->kind = Cmd::Bus; c->v = d.num("room"); c->v2 = d.num("master"); }
+    else if (t == "stroke") { c->kind = Cmd::StrokeMode; c->mode = d.truthy("mode") ? d.str("mode") : "head"; c->theta = d.num("theta"); }
     else if (t == "midicfg") { c->kind = Cmd::Midi; c->midi = parseMidiMap(d.get("cfg")); }
     else return nullptr;
     return c;
@@ -201,12 +205,18 @@ void Host::apply(Cmd& c)
         case Cmd::Pedal: if (single) single->pedal(c.kind2); break;
         case Cmd::PedalValue: if (single) single->pedalValue(c.v); break;
         case Cmd::Bus: room = c.v; master = c.v2; break;
+        case Cmd::StrokeMode:
+            if (notes && notes->drum) {
+                bool ok = c.mode == "head" || c.mode == "rimshot" || c.mode == "rimclick" || c.mode == "rim";
+                for (int k = 0; k < 128; k++) { if (k % 12 != 11) notes->st[k].mode = ok ? c.mode : std::string("head"); if (c.theta == c.theta) notes->st[k].theta = c.theta; }
+            }
+            break;
         case Cmd::Midi: midi = c.midi; strikeOv = NAN; if (kit) for (int i = 0; i < (int) kit->pieces.size(); i++) kit->setStrikePos(i, NAN); applyPitch(); break;
         default: break;
     }
 }
 
-void Host::noteOn(int note, double vel)
+void Host::noteOn(int note, double vel, int pair)
 {
     if (midi.velCurve) vel = std::pow(jmax(0, jmin(1, vel)), std::pow(3.0, -midi.velCurve));
     vel = jmax(0.02, vel);
@@ -218,6 +228,15 @@ void Host::noteOn(int note, double vel)
     }
     if (!notes->valid[note]) return;
     Stroke s = notes->st[note]; s.vel = vel;
+    if (notes->drum) {
+        bool isB = note % 12 == 11;
+        if (pair == 2) return;                                  // this B is part of a rimshot played by its partner note
+        if (pair == 1) s.mode = "rimshot";                       // note + B together: one rimshot where the note lands
+        else if (isB && clock - lastHeadAt <= (long long) (0.03 * sr)) {   // live: B just after a head stroke adds the hoop crack
+            single->strike(notes->st[note].r, s.theta, vel, "hoop"); return;
+        }
+        if (!isB) lastHeadAt = clock;
+    }
     if (strikeOv == strikeOv && s.tongue < 0 && (s.mode == "head" || s.mode == "shoulder")) s.r = strikeOv;
     single->noteOn(noteId(note), s);
 }
@@ -269,6 +288,7 @@ void Host::applyPitch()
 }
 void Host::process(float* L, float* R, int n, float* const* outL, float* const* outR, int nOut)
 {
+    clock += n;
     if (kitOn && kit) kit->process(L, n, R, outL, outR, nOut);
     else if (single) single->process(L, n, R);
     else for (int i = 0; i < n; i++) L[i] = R[i] = 0;

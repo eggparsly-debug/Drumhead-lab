@@ -199,12 +199,30 @@ void DrumheadProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         for (int i = 0; i < nOut; i++) { pl[i] = oL[i] ? oL[i] + at : nullptr; pr[i] = oR[i] ? oR[i] + at : nullptr; }
         H.process(L + at, R + at, len, nOut ? pl : nullptr, nOut ? pr : nullptr, nOut);
     };
-    int pos = 0;
+    // single drums: a B sounding with another note (same moment in the piano roll) makes one rimshot where that note lands
+    constexpr int kMaxEv = 256;
+    int evPos[kMaxEv], evNote[kMaxEv], evPair[kMaxEv], nEv = 0;
+    if (H.drumKeys()) {
+        for (const auto meta : midi) {
+            if (nEv >= kMaxEv) break;
+            const auto m = meta.getMessage();
+            if (!m.isNoteOn()) continue;
+            evPos[nEv] = meta.samplePosition; evNote[nEv] = m.getNoteNumber(); evPair[nEv] = 0; nEv++;
+        }
+        const int win = (int) (0.002 * currentSr);
+        for (int i = 0; i < nEv; i++) {
+            if (evNote[i] % 12 != 11 || evPair[i]) continue;
+            int best = -1, bd = win + 1;
+            for (int j = 0; j < nEv; j++) if (j != i && evNote[j] % 12 != 11 && !evPair[j]) { int d = std::abs(evPos[j] - evPos[i]); if (d < bd) { bd = d; best = j; } }
+            if (best >= 0) { evPair[i] = 2; evPair[best] = 1; }
+        }
+    }
+    int pos = 0, evI = 0;
     for (const auto meta : midi) {
         const auto m = meta.getMessage();
         int at = juce::jlimit(pos, n, meta.samplePosition);
         if (at > pos) { run(pos, at - pos); pos = at; }
-        if (m.isNoteOn()) H.noteOn(m.getNoteNumber(), m.getFloatVelocity());
+        if (m.isNoteOn()) { int pr = (evI < nEv) ? evPair[evI] : 0; evI++; H.noteOn(m.getNoteNumber(), m.getFloatVelocity(), pr); }
         else if (m.isNoteOff()) H.noteOff(m.getNoteNumber());
         else if (m.isAftertouch()) H.polyPressure(m.getNoteNumber(), m.getAfterTouchValue() / 127.0);
         else if (m.isChannelPressure()) H.channelPressure(m.getChannelPressureValue() / 127.0);

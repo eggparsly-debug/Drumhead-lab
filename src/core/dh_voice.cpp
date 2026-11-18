@@ -132,6 +132,11 @@ public:
             pulse(0.0006, 0.3 * jmin(ml.mass, 0.06) * v0 * 1.6 * PI / (2 * 0.0006), 0, pr, 0.006);
             return;
         }
+        if (mode == "hoop") {   // the hoop half of a rimshot, added to a head stroke that has just landed
+            double dur = jmax(0.00015, ml.tau * 0.5);
+            pulse(dur, 0.6 * jmin(ml.mass, 0.06) * v0 * 1.6 * PI / (2 * dur), 1, nullptr, 0);
+            return;
+        }
         if (mode == "rimclick") {
             auto ps = std::make_shared<std::vector<double>>(makePsi(0.9, theta, 0.01));
             pulse(0.00025, 0.4 * jmin(ml.mass, 0.06) * v0 * 1.6 * PI / (2 * 0.00025), 1, nullptr, 0);

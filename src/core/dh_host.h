@@ -17,7 +17,7 @@ constexpr const char* kVersion = "0.3.0";
 
 // how a single build answers MIDI notes (precomputed off the audio thread)
 struct NoteMap {
-    bool metal = false, hihat = false, any = false;
+    bool metal = false, hihat = false, any = false, drum = false;   // drum: keys C..A# cross the head, B is the rim
     std::array<bool, 128> valid{}; std::array<Stroke, 128> st{};
 };
 
@@ -34,7 +34,7 @@ MidiMap parseMidiMap(const Json& j);   // missing -> defaults (CC4 and CC1 work 
 
 struct Cmd {
     enum Kind { None, Single, Mode, SetKit, KPiece, KTrim, KMix, KMap, KOn, KOff, KPress, KCc, Punch, Panic,
-                Strike, Tongue, On, Off, Press, Cc, Choke, Pedal, PedalValue, Bus, Midi };
+                Strike, Tongue, On, Off, Press, Cc, Choke, Pedal, PedalValue, Bus, Midi, StrokeMode };
     Kind kind = None;
     std::unique_ptr<Player> player; std::unique_ptr<Kit> kit; std::unique_ptr<NoteMap> notes;
     int i = 0, n = 0, note = 0, num = 0; bool flag = false, hasLevel = false, hasPan = false, hasId = false;
@@ -57,7 +57,9 @@ public:
 
     // ---- audio thread ----
     void apply(Cmd& c);
-    void noteOn(int note, double vel);
+    // pair: 0 = alone, 1 = played together with a B (becomes a rimshot), 2 = a B consumed by such a pair
+    void noteOn(int note, double vel, int pair = 0);
+    bool drumKeys() const { return !(kitOn && kit) && notes && notes->drum; }
     void noteOff(int note);
     void polyPressure(int note, double v);
     void channelPressure(double v);
@@ -80,6 +82,7 @@ private:
     std::unique_ptr<Kit> kit; bool kitOn = false;
     void applyPitch();
     MidiMap midi = parseMidiMap(Json()); double bend = 0, strikeOv = NAN;
+    long long clock = 0, lastHeadAt = -1000000;
     double pu = 0, kv = 0; bool havePunch = false;   // (no punch until the page or the project sets it, as in the browser)
 };
 
